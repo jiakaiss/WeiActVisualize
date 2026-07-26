@@ -64,6 +64,11 @@ class StatResult:
     std: float
     percentiles: dict = field(default_factory=dict)
     histogram: Optional[HistogramResult] = None
+    kurtosis: float = float("nan")
+    skewness: float = float("nan")
+    tail_ratio: float = float("nan")
+    outlier_ratio: float = float("nan")
+    shape_label: str = ""
 
 
 @dataclass

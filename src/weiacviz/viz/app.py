@@ -6,7 +6,13 @@ from typing import Optional
 import gradio as gr
 import pandas as pd
 
-from .charts import channel_heatmap, comparison_histograms, distribution_histogram
+from .charts import (
+    channel_heatmap,
+    channel_stats_heatmap,
+    channel_violin,
+    comparison_histograms,
+    distribution_histogram,
+)
 from .progress import ProgressReporter, gradio_progress_adapter
 from .structure import build_module_table, build_overview
 from ..loading.calibration import load_calibration_texts
@@ -47,11 +53,17 @@ class App:
         return [m.path for m in self._modules]
 
     def view_weight(self, module_path: str, num_bins: int):
+        if self._model is None:
+            raise gr.Error("请先在「模型加载」tab 加载模型后再查看分布")
+        if not module_path:
+            raise gr.Error("请先点「刷新 module 列表」并选择一个 module")
         w = get_weight(self._model, module_path)
-        fig = distribution_histogram(w, name=module_path, num_bins=int(num_bins))
-        stats = weight_stats(w, module_path, granularity=Granularity.PER_CHANNEL)
-        hm = channel_heatmap([s.mean for s in stats], title=f"per-channel mean: {module_path}")
-        return fig, hm
+        nb = int(num_bins)
+        fig = distribution_histogram(w, name=module_path, num_bins=nb)
+        stats = weight_stats(w, module_path, granularity=Granularity.PER_CHANNEL, num_bins=nb)
+        hm = channel_stats_heatmap(stats, title=f"per-channel shape: {module_path}")
+        vio = channel_violin(w, name=f"per-channel violin: {module_path}")
+        return fig, hm, vio
 
     def run_calib(self, dataset: str, num_samples: int, batch_size: int, progress=gr.Progress()):
         paths = [m.path for m in self._modules]
@@ -75,7 +87,7 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
     app_obj = App(settings)
 
     with gr.Blocks() as demo:
-        gr.Markdown("# WeiActVisualize — 量化适配性分析")
+        gr.Markdown("# WeiActVisualize - 量化适配性分析")
         with gr.Tab("模型加载"):
             m_in = gr.Textbox(label="model name or path", value=app_obj.settings.model_name_or_path)
             d_in = gr.Dropdown(["fp32", "fp16", "bf16"], value=app_obj.settings.dtype, label="dtype")
@@ -105,9 +117,10 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             gr.Button("刷新 module 列表").click(refresh, outputs=mod_dd)
             bins_in = gr.Slider(16, 1024, value=256, step=16, label="histogram bins")
             w_btn = gr.Button("查看分布")
-            w_fig = gr.Plot()
-            w_hm = gr.Plot()
-            w_btn.click(app_obj.view_weight, [mod_dd, bins_in], [w_fig, w_hm])
+            w_fig = gr.Plot(label="整张量分布")
+            w_hm = gr.Plot(label="per-channel 形态指标")
+            w_vio = gr.Plot(label="per-channel violin")
+            w_btn.click(app_obj.view_weight, [mod_dd, bins_in], [w_fig, w_hm, w_vio])
 
         with gr.Tab("校准与激活"):
             ds_in = gr.Textbox(value=app_obj.settings.calibration_dataset, label="dataset")

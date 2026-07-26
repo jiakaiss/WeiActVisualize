@@ -50,3 +50,66 @@ def comparison_histograms(t_before, t_after, name: str = "values",
     fig.update_layout(barmode="overlay", title=f"Before vs after: {name}",
                       template="plotly_white")
     return fig
+
+
+def channel_stats_heatmap(
+    stats,
+    metrics=("kurtosis", "skewness", "tail_ratio", "outlier_ratio"),
+    title: str = "per-channel shape metrics",
+) -> go.Figure:
+    """Render a [metric x channel] heatmap from a StatResult list.
+
+    Heavy-tail channels are flagged via a count in the title and surfaced
+    through hovertext (shape_label), giving a distinguishable marking.
+    """
+    z, hover = [], []
+    for m in metrics:
+        zrow, hrow = [], []
+        for s in stats:
+            v = float(getattr(s, m, float("nan")))
+            if v != v:
+                v = float("nan")
+            zrow.append(v)
+            hrow.append(f"{m}: {v:.4g}\nlabel: {getattr(s, 'shape_label', '')}")
+        z.append(zrow)
+        hover.append(hrow)
+    heavy = sum(1 for s in stats if "重尾" in (getattr(s, "shape_label", "") or ""))
+    suffix = "s" if heavy != 1 else ""
+    fig = go.Figure(data=go.Heatmap(
+        z=z, hovertext=hover, colorscale="Viridis", y=list(metrics),
+    ))
+    fig.update_layout(
+        title=f"{title} ({heavy} heavy-tail channel{suffix})",
+        template="plotly_white", xaxis_title="channel", yaxis_title="metric",
+    )
+    return fig
+
+
+def channel_violin(weight, max_channels: int = 64,
+                   name: str = "per-channel distribution") -> go.Figure:
+    """Render per-channel violins; top-k by |max| when channels exceed limit.
+
+    When the output-channel count exceeds ``max_channels``, the channels with
+    the largest absolute magnitude are kept -- typically the outlier channels
+    most relevant to quantization difficulty (outlier_ratio fallback).
+    """
+    arr = to_numpy(weight)
+    if arr.ndim < 2:
+        arr = arr.reshape(1, -1)
+    n = arr.shape[0]
+    if n > max_channels:
+        maxabs = np.abs(arr).max(axis=1)
+        idx = np.argsort(maxabs)[::-1][:max_channels]
+        arr = arr[idx]
+        n = max_channels
+    fig = go.Figure()
+    for i in range(n):
+        fig.add_trace(go.Violin(
+            y=arr[i], name=f"ch{i}", points=False, box_visible=False,
+            showlegend=False,
+        ))
+    fig.update_layout(
+        title=name, template="plotly_white",
+        xaxis_title="channel", yaxis_title="value",
+    )
+    return fig
