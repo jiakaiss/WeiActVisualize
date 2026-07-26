@@ -4,9 +4,11 @@ from __future__ import annotations
 from typing import Optional
 
 import gradio as gr
+import pandas as pd
 
 from .charts import channel_heatmap, comparison_histograms, distribution_histogram
 from .progress import ProgressReporter, gradio_progress_adapter
+from .structure import build_module_table, build_overview
 from ..loading.calibration import load_calibration_texts
 from ..loading.model_loader import load_model
 from ..loading.module_resolver import resolve_modules
@@ -26,16 +28,20 @@ class App:
         self._model = None
         self._tokenizer = None
         self._modules = []
+        self._resolve_result = None
         self._aggregator = None
 
     def load(self, model_name_or_path: str, dtype: str, device: str):
         self._model, self._tokenizer = load_model(
             model_name_or_path, dtype=dtype, device=device,
         )
-        result = resolve_modules(self._model)
-        self._modules = result.modules
-        return (f"Loaded. family={result.family}, degraded={result.degraded}, "
-                f"{len(self._modules)} target modules.")
+        self._resolve_result = resolve_modules(self._model)
+        self._modules = self._resolve_result.modules
+        overview = build_overview(self._resolve_result, self._model)
+        table = pd.DataFrame(build_module_table(self._resolve_result, self._model))
+        status = (f"Loaded. family={self._resolve_result.family}, "
+                  f"{len(self._modules)} target modules.")
+        return status, overview, table, str(self._model)
 
     def module_choices(self):
         return [m.path for m in self._modules]
@@ -76,7 +82,18 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             dev_in = gr.Dropdown(["cpu", "cuda", "auto"], value=app_obj.settings.device, label="device")
             load_btn = gr.Button("加载模型")
             load_out = gr.Textbox(label="状态")
-            load_btn.click(app_obj.load, [m_in, d_in, dev_in], load_out)
+            gr.Markdown("### 模型结构")
+            overview_md = gr.Markdown("（加载后显示概览）")
+            structure_df = gr.Dataframe(
+                headers=["layer", "path", "kind", "shape", "dtype", "params"],
+                datatype=["number", "str", "str", "str", "str", "number"],
+                interactive=False,
+                wrap=True,
+            )
+            gr.Markdown("### 完整网络结构（print model）")
+            model_code = gr.Code(label="model architecture", language="python", interactive=False)
+            load_btn.click(app_obj.load, [m_in, d_in, dev_in],
+                           [load_out, overview_md, structure_df, model_code])
 
         with gr.Tab("权重分布"):
             mod_dd = gr.Dropdown([], label="module")
