@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     default_outlier_zscore: float = 3.0
     default_topk_sensitive: int = 10
 
+    # --- HuggingFace endpoint (mirror for regions where huggingface.co is unreachable) ---
+    hf_endpoint: str = "https://hf-mirror.com"
+
 
 def get_settings(**overrides) -> Settings:
     """Build a Settings instance, applying optional overrides."""
