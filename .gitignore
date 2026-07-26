@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Caches & outputs
+.weiacviz_cache/
+outputs/
+.pytest_cache/
+.coverage
+htmlcov/
+*.parquet
+
+# Env / secrets
+.env
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Claude local settings (keep skills/commands, ignore local-only settings)
+.claude/settings.local.json
