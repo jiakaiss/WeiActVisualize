@@ -6,7 +6,8 @@ from typing import List, Sequence
 import numpy as np
 import plotly.graph_objects as go
 
-from ..shared.types import HistogramResult
+from ..loading.weights import slice_weight
+from ..shared.types import Granularity, HistogramResult
 from ..stats._util import to_numpy
 from ..stats.histogram import histogram
 
@@ -85,31 +86,32 @@ def channel_stats_heatmap(
     return fig
 
 
-def channel_violin(weight, max_channels: int = 64,
+def channel_violin(weight, granularity: Granularity = Granularity.PER_CHANNEL,
+                   group_size=None, max_channels: int = 64,
                    name: str = "per-channel distribution") -> go.Figure:
-    """Render per-channel violins; top-k by |max| when channels exceed limit.
+    """Render per-slice violins; top-k by |max| when slice count exceeds limit.
 
-    When the output-channel count exceeds ``max_channels``, the channels with
-    the largest absolute magnitude are kept -- typically the outlier channels
-    most relevant to quantization difficulty (outlier_ratio fallback).
+    Slices come from ``slice_weight`` so per-channel (axis 0) and per-group
+    (flattened groups) share one path. When the slice count exceeds
+    ``max_channels``, slices with the largest absolute magnitude are kept --
+    typically the outlier slices most relevant to quantization difficulty.
     """
-    arr = to_numpy(weight)
-    if arr.ndim < 2:
-        arr = arr.reshape(1, -1)
-    n = arr.shape[0]
+    slices = slice_weight(weight, granularity, group_size)
+    arrs = [to_numpy(s).flatten() for s in slices]
+    n = len(arrs)
     if n > max_channels:
-        maxabs = np.abs(arr).max(axis=1)
+        maxabs = np.array([float(np.abs(a).max()) if a.size else 0.0 for a in arrs])
         idx = np.argsort(maxabs)[::-1][:max_channels]
-        arr = arr[idx]
+        arrs = [arrs[i] for i in idx]
         n = max_channels
     fig = go.Figure()
-    for i in range(n):
+    for i, a in enumerate(arrs):
         fig.add_trace(go.Violin(
-            y=arr[i], name=f"ch{i}", points=False, box_visible=False,
+            y=a, name=f"slice{i}", points=False, box_visible=False,
             showlegend=False,
         ))
     fig.update_layout(
         title=name, template="plotly_white",
-        xaxis_title="channel", yaxis_title="value",
+        xaxis_title="slice", yaxis_title="value",
     )
     return fig

@@ -52,17 +52,24 @@ class App:
     def module_choices(self):
         return [m.path for m in self._modules]
 
-    def view_weight(self, module_path: str, num_bins: int):
+    def view_weight(self, module_path: str, num_bins: int, granularity: str,
+                    group_size):
         if self._model is None:
             raise gr.Error("请先在「模型加载」tab 加载模型后再查看分布")
         if not module_path:
             raise gr.Error("请先点「刷新 module 列表」并选择一个 module")
+        gran = Granularity(granularity) if isinstance(granularity, str) else granularity
+        gs = int(group_size) if group_size else None
+        if gran == Granularity.PER_GROUP and (not gs or gs <= 0):
+            raise gr.Error("per-group 粒度下 group_size 需为正整数")
         w = get_weight(self._model, module_path)
         nb = int(num_bins)
+        label = "per-group" if gran == Granularity.PER_GROUP else "per-channel"
         fig = distribution_histogram(w, name=module_path, num_bins=nb)
-        stats = weight_stats(w, module_path, granularity=Granularity.PER_CHANNEL, num_bins=nb)
-        hm = channel_stats_heatmap(stats, title=f"per-channel shape: {module_path}")
-        vio = channel_violin(w, name=f"per-channel violin: {module_path}")
+        stats = weight_stats(w, module_path, granularity=gran, group_size=gs, num_bins=nb)
+        hm = channel_stats_heatmap(stats, title=f"{label} shape: {module_path}")
+        vio = channel_violin(w, granularity=gran, group_size=gs,
+                             name=f"{label} violin: {module_path}")
         return fig, hm, vio
 
     def run_calib(self, dataset: str, num_samples: int, batch_size: int, progress=gr.Progress()):
@@ -96,14 +103,14 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             load_out = gr.Textbox(label="状态")
             gr.Markdown("### 模型结构")
             overview_md = gr.Markdown("（加载后显示概览）")
+            gr.Markdown("### 完整网络结构（print model）")
+            model_code = gr.Code(label="model architecture", language="python", interactive=False)
             structure_df = gr.Dataframe(
                 headers=["layer", "path", "kind", "shape", "dtype", "params"],
                 datatype=["number", "str", "str", "str", "str", "number"],
                 interactive=False,
                 wrap=True,
             )
-            gr.Markdown("### 完整网络结构（print model）")
-            model_code = gr.Code(label="model architecture", language="python", interactive=False)
             load_btn.click(app_obj.load, [m_in, d_in, dev_in],
                            [load_out, overview_md, structure_df, model_code])
 
@@ -116,11 +123,14 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
 
             gr.Button("刷新 module 列表").click(refresh, outputs=mod_dd)
             bins_in = gr.Slider(16, 1024, value=256, step=16, label="histogram bins")
+            gran_dd = gr.Dropdown(["per-channel", "per-group"], value="per-channel", label="粒度")
+            gs_in = gr.Number(value=128, label="group_size (per-group 时生效)")
             w_btn = gr.Button("查看分布")
             w_fig = gr.Plot(label="整张量分布")
-            w_hm = gr.Plot(label="per-channel 形态指标")
-            w_vio = gr.Plot(label="per-channel violin")
-            w_btn.click(app_obj.view_weight, [mod_dd, bins_in], [w_fig, w_hm, w_vio])
+            w_hm = gr.Plot(label="形态指标")
+            w_vio = gr.Plot(label="分布 violin")
+            w_btn.click(app_obj.view_weight, [mod_dd, bins_in, gran_dd, gs_in],
+                        [w_fig, w_hm, w_vio])
 
         with gr.Tab("校准与激活"):
             ds_in = gr.Textbox(value=app_obj.settings.calibration_dataset, label="dataset")

@@ -197,7 +197,34 @@ def test_view_weight_returns_three_figures():
     from weiacviz.viz.app import App
     app = App()
     app._model = nn.Sequential(nn.Linear(8, 16))
-    fig, hm, vio = app.view_weight("0", 64)
+    fig, hm, vio = app.view_weight("0", 64, "per-channel", None)
     assert isinstance(fig, go.Figure)
     assert isinstance(hm, go.Figure)
     assert isinstance(vio, go.Figure)
+
+
+def test_view_weight_per_group():
+    import torch.nn as nn
+    from weiacviz.viz.app import App
+    app = App()
+    app._model = nn.Sequential(nn.Linear(8, 16))
+    fig, hm, vio = app.view_weight("0", 64, "per-group", 4)
+    assert isinstance(fig, go.Figure)
+    assert isinstance(hm, go.Figure)
+    assert isinstance(vio, go.Figure)
+
+
+def test_view_weight_per_group_invalid_size():
+    import pytest
+    import torch.nn as nn
+    from weiacviz.viz.app import App
+    app = App()
+    app._model = nn.Sequential(nn.Linear(8, 16))
+    with pytest.raises(Exception):
+        app.view_weight("0", 64, "per-group", 0)
+
+
+def test_channel_violin_per_group():
+    w = torch.randn(4, 16)
+    fig = channel_violin(w, granularity=Granularity.PER_GROUP, group_size=4)
+    assert isinstance(fig, go.Figure)
