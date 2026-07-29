@@ -68,7 +68,7 @@ class App:
         fig = distribution_histogram(w, name=module_path, num_bins=nb)
         stats = weight_stats(w, module_path, granularity=gran, group_size=gs, num_bins=nb)
         hm = channel_stats_heatmap(stats, title=f"{label} shape: {module_path}")
-        vio = channel_violin(w, granularity=gran, group_size=gs,
+        vio = channel_violin(w, granularity=gran, group_size=gs, stats=stats,
                              name=f"{label} violin: {module_path}")
         return fig, hm, vio
 
@@ -125,6 +125,24 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             bins_in = gr.Slider(16, 1024, value=256, step=16, label="histogram bins")
             gran_dd = gr.Dropdown(["per-channel", "per-group"], value="per-channel", label="粒度")
             gs_in = gr.Number(value=128, label="group_size (per-group 时生效)")
+            with gr.Accordion("术语说明（kurtosis / q1 / q3 / kde 等含义）", open=False):
+                gr.Markdown("""### 分布形态指标
+- **excess kurtosis（超额峰度，轴上 `k=`）**：度量重尾程度。正态分布 = 0；> 0 重尾（> 3 标记“重尾”）；< 0 轻尾。越大 = 尾部越重 = 量化时 scale 越被离群值浪费。
+- **skewness（偏度）**：分布不对称性。|偏度| > 0.5 时提示“偏态，非对称量化可能更优”。
+- **tail-ratio**：`(p99.9 − p0.1) / (2·std)`，尾部动态范围 / 主体宽度。大 = 少数极值撑开 range。
+- **outlier-ratio**：超过 99.9 百分的离群值比例（每切片约 0.1%，跨切片区分度低，仅供参考）。
+- **形态标签**：正态 / 重尾 / 轻尾（基于 kurtosis 阈值）。
+
+### violin 图（鼠标悬停显示）
+- **kde（核密度估计）**：violin 的轮廓形状，某处宽度 = 该值附近数据密度（越宽 = 数据越多）。
+- **q1 / q3**：25% / 75% 分位数，`q3 − q1` = IQR（主体 50% 数据的宽度）。
+- **median / mean**：中位数 / 均值。
+- **top-k 采样**：切片数超过 64 时，按 kurtosis 取最重尾的 64 个展示，每个标注 `k=` 值。
+
+### 整张量直方图
+整张权重展平分桶，看全局分布形状。
+
+**怎么看**：`k=` 大 + violin 两端拉长 + IQR 窄 = 主体集中但有重尾 = 量化最难的切片。""")
             w_btn = gr.Button("查看分布")
             w_fig = gr.Plot(label="整张量分布")
             w_hm = gr.Plot(label="形态指标")

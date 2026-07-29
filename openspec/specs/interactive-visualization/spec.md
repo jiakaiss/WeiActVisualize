@@ -31,7 +31,7 @@ TBD - created by archiving change add-quant-analysis-core. Update Purpose after 
 
 #### Scenario: 大切片数 violin 采样
 - **WHEN** 当前粒度下切片数超过 violin 展示上限（默认 64）
-- **THEN** 界面按 outlier-ratio 取 top-k 切片绘制 violin，避免渲染卡顿
+- **THEN** 界面按 excess kurtosis 取 top-k 切片绘制 violin，且每个 violin 标注其 kurtosis 值
 
 #### Scenario: 形态标签可视化
 - **WHEN** 某切片被标记为“重尾”

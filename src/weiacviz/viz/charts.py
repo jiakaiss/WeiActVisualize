@@ -55,63 +55,84 @@ def comparison_histograms(t_before, t_after, name: str = "values",
 
 def channel_stats_heatmap(
     stats,
-    metrics=("kurtosis", "skewness", "tail_ratio", "outlier_ratio"),
+    metrics=("kurtosis", "skewness", "tail_ratio"),
     title: str = "per-channel shape metrics",
 ) -> go.Figure:
-    """Render a [metric x channel] heatmap from a StatResult list.
+    """Render a [metric x slice] heatmap from a StatResult list.
 
-    Heavy-tail channels are flagged via a count in the title and surfaced
-    through hovertext (shape_label), giving a distinguishable marking.
+    Each metric row is **independently min-max normalized** to [0, 1] for
+    color, so metrics with very different scales (kurtosis ~tens vs tail_ratio
+    ~single digits) each show their own gradient. Hover still shows the raw
+    value. Default metrics exclude outlier_ratio (near-constant ~0.1% across
+    slices, no signal in a heatmap). Each cell's hover carries the slice index
+    so it can be cross-referenced with the violin's `#<index>` labels.
     """
-    z, hover = [], []
+    z_norm, hover = [], []
     for m in metrics:
+        raw = [float(getattr(s, m, float("nan"))) for s in stats]
+        valid = [v for v in raw if v == v]
+        lo = min(valid) if valid else 0.0
+        hi = max(valid) if valid else 1.0
+        rng = (hi - lo) if hi > lo else 1.0
         zrow, hrow = [], []
-        for s in stats:
-            v = float(getattr(s, m, float("nan")))
-            if v != v:
-                v = float("nan")
-            zrow.append(v)
-            hrow.append(f"{m}: {v:.4g}\nlabel: {getattr(s, 'shape_label', '')}")
-        z.append(zrow)
+        for j, v in enumerate(raw):
+            nv = (v - lo) / rng if v == v else float("nan")
+            zrow.append(nv)
+            hrow.append(f"slice #{j}\n{m}: {v:.4g}\nlabel: {getattr(stats[j], 'shape_label', '')}")
+        z_norm.append(zrow)
         hover.append(hrow)
     heavy = sum(1 for s in stats if "重尾" in (getattr(s, "shape_label", "") or ""))
     suffix = "s" if heavy != 1 else ""
     fig = go.Figure(data=go.Heatmap(
-        z=z, hovertext=hover, colorscale="Viridis", y=list(metrics),
+        z=z_norm, hovertext=hover, colorscale="Viridis", y=list(metrics),
     ))
     fig.update_layout(
-        title=f"{title} ({heavy} heavy-tail channel{suffix})",
-        template="plotly_white", xaxis_title="channel", yaxis_title="metric",
+        title=f"{title} ({heavy} heavy-tail slice{suffix})",
+        template="plotly_white", xaxis_title="slice index", yaxis_title="metric",
     )
     return fig
 
 
 def channel_violin(weight, granularity: Granularity = Granularity.PER_CHANNEL,
-                   group_size=None, max_channels: int = 64,
+                   group_size=None, stats=None, max_channels: int = 64,
                    name: str = "per-channel distribution") -> go.Figure:
-    """Render per-slice violins; top-k by |max| when slice count exceeds limit.
+    """Render per-slice violins; top-k by excess kurtosis (heavy-tail severity).
 
-    Slices come from ``slice_weight`` so per-channel (axis 0) and per-group
-    (flattened groups) share one path. When the slice count exceeds
-    ``max_channels``, slices with the largest absolute magnitude are kept --
-    typically the outlier slices most relevant to quantization difficulty.
+    Slices come from ``slice_weight`` (per-channel axis 0 / per-group flattened
+    groups share one path). When the slice count exceeds ``max_channels``, the
+    slices with the highest excess kurtosis are kept -- kurtosis directly
+    measures heavy-tailedness, so this surfaces the most outlier-prone slices.
+    Each violin is labeled with its **original slice index** and kurtosis
+    (e.g. `#42 k=12.3`) so it can be cross-referenced with the shape heatmap.
     """
     slices = slice_weight(weight, granularity, group_size)
     arrs = [to_numpy(s).flatten() for s in slices]
     n = len(arrs)
+    if stats is not None and len(stats) == n:
+        kurts = [float(getattr(s, "kurtosis", float("nan"))) for s in stats]
+    else:
+        kurts = [float("nan")] * n
     if n > max_channels:
-        maxabs = np.array([float(np.abs(a).max()) if a.size else 0.0 for a in arrs])
-        idx = np.argsort(maxabs)[::-1][:max_channels]
-        arrs = [arrs[i] for i in idx]
-        n = max_channels
+        order = sorted(
+            range(n),
+            key=lambda i: kurts[i] if kurts[i] == kurts[i] else float("-inf"),
+            reverse=True,
+        )
+        sel = order[:max_channels]
+    else:
+        sel = list(range(n))
     fig = go.Figure()
-    for i, a in enumerate(arrs):
+    for i in sel:
+        a = arrs[i]
+        k = kurts[i]
+        label = f"#{i} k={k:.2g}" if k == k else f"#{i}"
+        hover = f"slice #{i}\nkurtosis={k:.4g}" if k == k else f"slice #{i}"
         fig.add_trace(go.Violin(
-            y=a, name=f"slice{i}", points=False, box_visible=False,
-            showlegend=False,
+            y=a, name=label, points=False, box_visible=False,
+            showlegend=False, hovertext=hover,
         ))
     fig.update_layout(
         title=name, template="plotly_white",
-        xaxis_title="slice", yaxis_title="value",
+        xaxis_title="slice (top-k by kurtosis)", yaxis_title="value",
     )
     return fig

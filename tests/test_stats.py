@@ -179,6 +179,21 @@ def test_channel_stats_heatmap_returns_figure():
     assert isinstance(fig, go.Figure)
 
 
+def test_channel_stats_heatmap_per_row_normalize():
+    w = torch.randn(8, 32)
+    stats = weight_stats(w, "m", granularity=Granularity.PER_CHANNEL)
+    fig = channel_stats_heatmap(stats)
+    z = fig.data[0].z
+    # default metrics exclude outlier_ratio
+    assert list(fig.data[0].y) == ["kurtosis", "skewness", "tail_ratio"]
+    # each row independently normalized to [0, 1]
+    for row in z:
+        valid = [v for v in row if v == v]
+        assert valid
+        assert min(valid) >= 0.0
+        assert max(valid) <= 1.0
+
+
 def test_channel_violin_topk_sampling():
     w = torch.randn(100, 8)
     fig = channel_violin(w, max_channels=16)
@@ -228,3 +243,23 @@ def test_channel_violin_per_group():
     w = torch.randn(4, 16)
     fig = channel_violin(w, granularity=Granularity.PER_GROUP, group_size=4)
     assert isinstance(fig, go.Figure)
+
+
+def test_channel_violin_kurtosis_topk_and_label():
+    w = torch.randn(100, 16)
+    stats = weight_stats(w, "m", granularity=Granularity.PER_CHANNEL)
+    fig = channel_violin(w, granularity=Granularity.PER_CHANNEL,
+                         stats=stats, max_channels=16)
+    assert len(fig.data) == 16
+    # kept violins are labeled with original slice index + kurtosis
+    assert all(t.name.startswith("#") for t in fig.data)
+    assert all("k=" in t.name for t in fig.data)
+
+
+def test_channel_violin_fallback_label_without_stats():
+    w = torch.randn(100, 16)
+    fig = channel_violin(w, granularity=Granularity.PER_CHANNEL, max_channels=16)
+    assert len(fig.data) == 16
+    # no stats -> "#<index>" labels without kurtosis
+    assert all(t.name.startswith("#") for t in fig.data)
+    assert all("k=" not in t.name for t in fig.data)
