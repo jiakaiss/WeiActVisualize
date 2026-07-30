@@ -12,6 +12,7 @@ from .charts import (
     channel_violin,
     comparison_histograms,
     distribution_histogram,
+    render_histogram_result,
 )
 from .progress import ProgressReporter, gradio_progress_adapter
 from .structure import build_module_table, build_overview
@@ -22,7 +23,7 @@ from ..loading.runner import run_calibration
 from ..loading.weights import get_weight
 from ..quant.fake_quant import fake_quantize_tensor
 from ..shared.config import Settings, get_settings
-from ..shared.types import Granularity, QuantConfig, Symmetry
+from ..shared.types import CaptureConfig, Granularity, QuantConfig, Symmetry
 from ..stats.weight_stats import weight_stats
 
 
@@ -72,15 +73,35 @@ class App:
                              name=f"{label} violin: {module_path}")
         return fig, hm, vio
 
-    def run_calib(self, dataset: str, num_samples: int, batch_size: int, progress=gr.Progress()):
+    def run_calib(self, dataset: str, num_samples: int, batch_size: int,
+                  collect_histogram: bool, num_bins: int, progress=gr.Progress()):
         paths = [m.path for m in self._modules]
         texts = load_calibration_texts(dataset, num_samples=num_samples)
         reporter = ProgressReporter(gradio_progress_adapter(progress))
+        cfg = CaptureConfig(max_samples=len(texts), batch_size=int(batch_size))
         self._aggregator = run_calibration(
             self._model, self._tokenizer, texts, paths,
-            config=None, progress_cb=reporter.callback,
+            config=cfg, progress_cb=reporter.callback,
+            collect_histogram=bool(collect_histogram),
+            num_bins=int(num_bins),
         )
-        return f"Calibration done. {len(paths)} modules captured."
+        n_hist = sum(
+            1 for p in paths
+            if self._aggregator.histograms.get(p, {}).get("output") is not None
+        )
+        return (f"Calibration done. {len(paths)} modules captured, "
+                f"{n_hist} with histogram.")
+
+    def view_activation(self, module_path: str):
+        if self._aggregator is None:
+            raise gr.Error("请先运行校准")
+        if not module_path:
+            raise gr.Error("请先刷新并选择一个 module")
+        h = self._aggregator.histograms.get(module_path, {}).get("output")
+        if h is None:
+            raise gr.Error("该 module 未采集激活直方图，请勾选「采集直方图」后重新运行校准")
+        return render_histogram_result(
+            h.to_result(), name=f"activation: {module_path}")
 
     def quant_compare(self, module_path: str, bits: int):
         w = get_weight(self._model, module_path)
@@ -154,9 +175,25 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             ds_in = gr.Textbox(value=app_obj.settings.calibration_dataset, label="dataset")
             ns_in = gr.Slider(1, 1024, value=app_obj.settings.calibration_samples, step=1, label="samples")
             bs_in = gr.Slider(1, 64, value=app_obj.settings.calibration_batch_size, step=1, label="batch size")
+            hist_in = gr.Checkbox(value=app_obj.settings.calibration_collect_histogram,
+                                  label="采集直方图（两遍校准，较慢）")
+            hbins_in = gr.Slider(16, 1024, value=app_obj.settings.calibration_histogram_bins,
+                                 step=16, label="histogram bins")
             cal_btn = gr.Button("运行校准")
             cal_out = gr.Textbox(label="状态")
-            cal_btn.click(app_obj.run_calib, [ds_in, ns_in, bs_in], cal_out)
+            cal_btn.click(app_obj.run_calib, [ds_in, ns_in, bs_in, hist_in, hbins_in], cal_out)
+
+            gr.Markdown("### 激活分布（选 module 查看其 output 全局直方图）")
+            act_mod = gr.Dropdown([], label="module")
+
+            def refresh_act():
+                choices = app_obj.module_choices()
+                return gr.update(choices=choices, value=choices[0] if choices else None)
+
+            gr.Button("刷新 module 列表").click(refresh_act, outputs=act_mod)
+            act_btn = gr.Button("查看激活分布")
+            act_fig = gr.Plot(label="激活全局直方图")
+            act_btn.click(app_obj.view_activation, [act_mod], act_fig)
 
         with gr.Tab("量化模拟"):
             q_mod = gr.Dropdown([], label="module")

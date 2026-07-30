@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     calibration_samples: int = 128
     calibration_batch_size: int = 8
     calibration_seq_length: int = 2048
+    calibration_collect_histogram: bool = True
+    calibration_histogram_bins: int = 256
 
     # --- Cache / output ---
     cache_dir: Path = Field(default_factory=lambda: Path(".weiacviz_cache"))

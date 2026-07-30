@@ -5,7 +5,7 @@ import torch.nn as nn
 from weiacviz.loading.module_resolver import resolve_modules, detect_arch_family
 from weiacviz.loading.weights import get_weight, slice_weight
 from weiacviz.loading.hook import ActivationCapture
-from weiacviz.loading.runner import RunningStats, OnlineAggregator
+from weiacviz.loading.runner import RunningStats, OnlineAggregator, run_calibration
 from weiacviz.shared.types import Granularity, ModuleKind
 
 
@@ -117,7 +117,6 @@ def test_running_stats_online_aggregation():
 def test_online_aggregator_memory_independent_of_batches():
     model = TinyLlamaLike()
     paths = [m.path for m in resolve_modules(model).modules]
-    from weiacviz.loading.runner import run_calibration
 
     class DummyTok:
         def __call__(self, texts, return_tensors="pt", padding=True,
@@ -131,3 +130,70 @@ def test_online_aggregator_memory_independent_of_batches():
     # every target module should have non-zero activation counts
     for p in paths:
         assert agg.stats[p]["output"].count > 0
+
+
+def test_running_histogram_fixed_range_accumulates():
+    from weiacviz.loading.runner import RunningHistogram
+    h = RunningHistogram((0.0, 1.0), num_bins=4)
+    h.update(torch.tensor([0.1, 0.2, 0.3]))
+    h.update(torch.tensor([0.6, 0.9]))
+    res = h.to_result()
+    assert res.num_bins == 4
+    assert len(res.counts) == 4
+    assert len(res.bin_edges) == 5
+    assert sum(res.counts) == 5
+    # edges [0, 0.25, 0.5, 0.75, 1.0]: 0.1,0.2->bin0; 0.3->bin1; 0.6->bin2; 0.9->bin3
+    assert res.counts == [2, 1, 1, 1]
+
+
+def test_two_pass_calibration_collects_histogram():
+    model = TinyLlamaLike()
+    paths = [m.path for m in resolve_modules(model).modules]
+
+    class DummyTok:
+        def __call__(self, texts, return_tensors="pt", padding=True,
+                     truncation=True, max_length=2048):
+            n = len(texts)
+            return {"input_ids": torch.ones(n, max_length)}
+
+    texts = ["a b c"] * 20
+    agg = run_calibration(model, DummyTok(), texts, paths,
+                          config=None, seq_length=8,
+                          collect_histogram=True, num_bins=32)
+    for p in paths:
+        s = agg.stats[p]["output"]
+        assert s.count > 0
+        h = agg.histograms[p]["output"]
+        assert h is not None
+        res = h.to_result()
+        assert res.num_bins == 32
+        # deterministic input -> Pass 2 stays within Pass 1 range -> no drops
+        assert sum(res.counts) == s.count
+
+
+def test_calibration_without_histogram_leaves_histograms_none():
+    model = TinyLlamaLike()
+    paths = [m.path for m in resolve_modules(model).modules]
+
+    class DummyTok:
+        def __call__(self, texts, return_tensors="pt", padding=True,
+                     truncation=True, max_length=2048):
+            n = len(texts)
+            return {"input_ids": torch.ones(n, max_length)}
+
+    texts = ["a b c"] * 8
+    agg = run_calibration(model, DummyTok(), texts, paths,
+                          config=None, seq_length=8, collect_histogram=False)
+    for p in paths:
+        assert agg.histograms[p]["output"] is None
+        assert agg.stats[p]["output"].count > 0
+
+
+def test_running_histogram_degenerate_range():
+    from weiacviz.loading.runner import RunningHistogram
+    # min == max: must not raise, expands to non-zero width
+    h = RunningHistogram((2.5, 2.5), num_bins=4)
+    h.update(torch.tensor([2.5, 2.5, 2.5]))
+    res = h.to_result()
+    assert res.num_bins == 4
+    assert sum(res.counts) == 3

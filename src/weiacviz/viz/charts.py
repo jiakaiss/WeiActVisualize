@@ -25,6 +25,23 @@ def distribution_histogram(t, name: str = "values", num_bins: int = 256) -> go.F
     return fig
 
 
+def render_histogram_result(h: HistogramResult, name: str = "values") -> go.Figure:
+    """Render an already-aggregated ``HistogramResult`` (e.g. online activation histogram).
+
+    Unlike ``distribution_histogram`` (which buckets a raw tensor), this takes
+    a pre-aggregated histogram so it can render activations folded online
+    across batches without retaining raw tensors.
+    """
+    centers = [(a + b) / 2 for a, b in zip(h.bin_edges[:-1], h.bin_edges[1:])]
+    fig = go.Figure(data=[go.Bar(x=centers, y=h.counts, name=name)])
+    fig.update_layout(
+        title=f"Distribution: {name}",
+        xaxis_title="value", yaxis_title="count",
+        bargap=0.01, template="plotly_white",
+    )
+    return fig
+
+
 def channel_heatmap(values: Sequence[float], title: str = "per-channel stats") -> go.Figure:
     """Render a 1D heatmap of per-channel values."""
     arr = np.asarray(list(values), dtype=np.float64).reshape(1, -1)
