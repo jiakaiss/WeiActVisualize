@@ -1,4 +1,5 @@
 """Tests for loading module using a tiny synthetic model (no HF download)."""
+import pytest
 import torch
 import torch.nn as nn
 
@@ -197,3 +198,50 @@ def test_running_histogram_degenerate_range():
     res = h.to_result()
     assert res.num_bins == 4
     assert sum(res.counts) == 3
+
+
+def test_detect_available_backend_returns_valid():
+    from weiacviz.loading.model_loader import detect_available_backend
+    assert detect_available_backend() in {"cpu", "cuda", "npu"}
+
+
+def test_move_to_backend_npu_missing_raises_runtime_error():
+    # Without torch_npu installed, requesting npu must raise a clear RuntimeError
+    # (not an ImportError crash).
+    from weiacviz.loading.model_loader import _move_to_backend
+    try:
+        import torch_npu  # noqa: F401
+        has_npu = True
+    except Exception:
+        has_npu = False
+    if has_npu:
+        pytest.skip("torch_npu installed; cannot test missing-backend path")
+    with pytest.raises(RuntimeError):
+        _move_to_backend(torch.zeros(1), "npu")
+
+
+def test_load_model_cpu_branch(monkeypatch):
+    from weiacviz.loading import model_loader as ml
+
+    calls = {}
+
+    class FakeModel:
+        def eval(self):
+            calls["eval"] = True
+
+        def to(self, d):
+            calls["to"] = d
+            return self
+
+    def fake_from_pretrained(path, **kw):
+        calls["from_pretrained"] = kw
+        return FakeModel()
+
+    monkeypatch.setattr(ml, "_resolve_model_path", lambda p: p)
+    monkeypatch.setattr(ml.AutoModelForCausalLM, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(ml.AutoTokenizer, "from_pretrained", lambda p, **kw: "tok")
+
+    model, tok = ml.load_model("dummy", device="cpu")
+    assert tok == "tok"
+    assert calls["from_pretrained"]["device_map"] == "cpu"
+    assert calls.get("eval") is True

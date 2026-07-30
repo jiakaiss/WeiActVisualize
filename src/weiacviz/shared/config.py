@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # --- Model ---
     model_name_or_path: str = "Qwen/Qwen2-0.5B"
     dtype: Literal["fp32", "fp16", "bf16"] = "fp16"
-    device: Literal["cpu", "cuda", "auto"] = "auto"
+    device: Literal["auto", "cpu"] = "auto"
 
     # --- Calibration data ---
     calibration_dataset: str = "wikitext2"

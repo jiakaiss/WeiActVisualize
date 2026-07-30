@@ -1,4 +1,4 @@
-"""HuggingFace model loading with dtype control and sharded device_map."""
+"""HuggingFace model loading with dtype control and multi-backend device."""
 from __future__ import annotations
 
 import os
@@ -34,6 +34,36 @@ _DTYPE_MAP = {
 }
 
 
+def detect_available_backend() -> str:
+    """Detect the best available compute backend: cuda > npu > cpu.
+
+    NPU detection guards the ``torch_npu`` import so environments without
+    Ascend tooling do not crash.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    try:
+        import torch_npu  # noqa: F401
+
+        if torch.npu.is_available():
+            return "npu"
+    except Exception:  # noqa: BLE001
+        pass
+    return "cpu"
+
+
+def _move_to_backend(model, device: str):
+    """Move an already-loaded model onto ``device`` (npu)."""
+    if device == "npu":
+        try:
+            import torch_npu  # noqa: F401
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                "device='npu' 需要 Ascend NPU 后端，请安装 torch_npu"
+            ) from e
+    return model.to(device)
+
+
 def load_model(
     model_name_or_path: str,
     dtype: str = "fp16",
@@ -45,9 +75,9 @@ def load_model(
     Args:
         model_name_or_path: HF hub id or local path.
         dtype: "fp32" | "fp16" | "bf16".
-        device: "cpu" (CPU only), "cuda" (single GPU), or "auto"
-            (device_map="auto": shard across devices with CPU offload as
-            needed, enabling models larger than a single GPU's memory).
+        device: "auto" | "cpu". "auto" detects the best available accelerator
+            (cuda > npu > cpu); cuda uses device_map="auto" sharding (large-model
+            friendly), npu uses model.to. "cpu" forces CPU.
 
     Returns:
         (model, tokenizer) with model in eval mode.
@@ -60,22 +90,27 @@ def load_model(
         resolved, trust_remote_code=trust_remote_code
     )
 
+    if device == "auto":
+        device = detect_available_backend()
+
     if device == "cpu":
         model = AutoModelForCausalLM.from_pretrained(
             resolved, dtype=torch_dtype,
             device_map="cpu", trust_remote_code=trust_remote_code,
         )
     elif device == "cuda":
-        model = AutoModelForCausalLM.from_pretrained(
-            resolved, dtype=torch_dtype,
-            trust_remote_code=trust_remote_code,
-        )
-        model = model.to("cuda")
-    else:  # auto: shard + offload
+        # device_map="auto" shards across GPUs with CPU offload as needed,
+        # supporting models larger than a single GPU's memory.
         model = AutoModelForCausalLM.from_pretrained(
             resolved, dtype=torch_dtype,
             device_map="auto", trust_remote_code=trust_remote_code,
         )
+    else:  # npu: load on CPU then move (no device_map sharding)
+        model = AutoModelForCausalLM.from_pretrained(
+            resolved, dtype=torch_dtype,
+            trust_remote_code=trust_remote_code,
+        )
+        model = _move_to_backend(model, device)
 
     model.eval()
     return model, tokenizer

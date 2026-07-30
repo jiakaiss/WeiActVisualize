@@ -119,7 +119,7 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
         with gr.Tab("模型加载"):
             m_in = gr.Textbox(label="model name or path", value=app_obj.settings.model_name_or_path)
             d_in = gr.Dropdown(["fp32", "fp16", "bf16"], value=app_obj.settings.dtype, label="dtype")
-            dev_in = gr.Dropdown(["cpu", "cuda", "auto"], value=app_obj.settings.device, label="device")
+            dev_in = gr.Dropdown(["auto", "cpu"], value=app_obj.settings.device, label="device")
             load_btn = gr.Button("加载模型")
             load_out = gr.Textbox(label="状态")
             gr.Markdown("### 模型结构")
