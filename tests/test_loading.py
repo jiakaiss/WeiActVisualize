@@ -200,6 +200,89 @@ def test_running_histogram_degenerate_range():
     assert sum(res.counts) == 3
 
 
+def test_running_token_stats_online_matches_one_shot():
+    """Per-token abs_max moments aggregated online match a one-shot compute."""
+    from weiacviz.loading.runner import RunningTokenStats
+    from weiacviz.stats.shape import excess_kurtosis, skewness
+    torch.manual_seed(1)
+    acts = [torch.randn(3, 4, 8) for _ in range(3)]
+    ts = RunningTokenStats(num_bins=16)
+    for a in acts:
+        ts.update_moments(a)
+    all_absmax = torch.cat(
+        [a.abs().amax(dim=-1).reshape(-1) for a in acts]).numpy()
+    assert ts.count == len(all_absmax)
+    assert abs(ts.mean - all_absmax.mean()) < 1e-6
+    assert abs(ts.std - all_absmax.std()) < 1e-6
+    assert abs(ts.cv - all_absmax.std() / all_absmax.mean()) < 1e-6
+    assert abs(ts.kurtosis - excess_kurtosis(all_absmax)) < 1e-3
+    assert abs(ts.skewness - skewness(all_absmax)) < 1e-3
+
+
+def test_running_channel_stats_finds_outlier_channels():
+    """Per-channel abs_mean aggregation surfaces injected outlier channels."""
+    from weiacviz.loading.runner import RunningChannelStats
+    from weiacviz.stats.activation_stats import activation_outlier_channels
+    cs = RunningChannelStats()
+    base = torch.randn(4, 4, 8)
+    for _ in range(3):
+        cs.update(base)
+    outlier = torch.randn(2, 4, 8)
+    outlier[..., 3] *= 25
+    outlier[..., 6] *= 20
+    cs.update(outlier)
+    res = activation_outlier_channels(cs)
+    assert set(res["top_channels"][:2]) == {3, 6}
+    assert res["severity"] > 1.0
+
+
+def test_two_pass_calibration_collects_token_histogram():
+    """collect_histogram + collect_token_stats builds a per-token abs_max
+    histogram whose counts equal the token count (no out-of-range drops)."""
+    model = TinyLlamaLike()
+    paths = [m.path for m in resolve_modules(model).modules]
+
+    class DummyTok:
+        def __call__(self, texts, return_tensors="pt", padding=True,
+                     truncation=True, max_length=2048):
+            n = len(texts)
+            return {"input_ids": torch.arange(n * max_length).reshape(n, max_length).float()}
+
+    texts = ["a b c"] * 12
+    agg = run_calibration(model, DummyTok(), texts, paths, config=None,
+                          seq_length=8, collect_histogram=True, num_bins=32,
+                          collect_token_stats=True)
+    for p in paths:
+        ts = agg.token_stats[p]["output"]
+        assert ts is not None and ts.count > 0
+        assert ts.abs_max_hist is not None  # built between passes
+        assert ts.kurtosis == ts.kurtosis  # not NaN (varying input)
+        assert sum(ts.abs_max_hist.counts.tolist()) == ts.count
+
+
+def test_single_pass_calibration_token_stats_without_histogram():
+    """Without collect_histogram, per-token moments are still computed
+    (single pass) but no per-token histogram is built."""
+    model = TinyLlamaLike()
+    paths = [m.path for m in resolve_modules(model).modules]
+
+    class DummyTok:
+        def __call__(self, texts, return_tensors="pt", padding=True,
+                     truncation=True, max_length=2048):
+            n = len(texts)
+            return {"input_ids": torch.arange(n * max_length).reshape(n, max_length).float()}
+
+    texts = ["a b c"] * 8
+    agg = run_calibration(model, DummyTok(), texts, paths, config=None,
+                          seq_length=8, collect_histogram=False,
+                          collect_token_stats=True)
+    for p in paths:
+        ts = agg.token_stats[p]["output"]
+        assert ts is not None and ts.count > 0
+        assert ts.abs_max_hist is None  # no two-pass -> no histogram
+        assert ts.cv == ts.cv  # moments available
+
+
 def test_detect_available_backend_returns_valid():
     from weiacviz.loading.model_loader import detect_available_backend
     assert detect_available_backend() in {"cpu", "cuda", "npu"}

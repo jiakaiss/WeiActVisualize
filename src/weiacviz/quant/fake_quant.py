@@ -84,3 +84,30 @@ def fake_quantize_tensor(t: torch.Tensor, config: QuantConfig) -> torch.Tensor:
     if pad:
         q = q[:, :in_f]
     return q.reshape(original_shape).to(t.dtype)
+
+
+def fake_quantize_activation(t, bits: int = 8,
+                             granularity: str = "per-token",
+                             symmetry: Symmetry = Symmetry.SYMMETRIC) -> torch.Tensor:
+    """Fake-quantize an activation tensor (W8A8 style).
+
+    ``per-token`` (default, W8A8 standard): one scale per token -- reduce
+    amax along the hidden (last) dim, so each token row gets its own scale
+    and one large token does not blow up the scale for others.
+    ``per-tensor``: a single scale over all values (rarely used for activations).
+
+    Returns the same dtype as the input so it can be fed straight back into
+    ``module(x)``.
+    """
+    orig_dtype = t.dtype
+    t = t.detach().float()
+    orig_shape = t.shape
+    if t.dim() < 2:
+        t = t.reshape(1, -1)
+    flat = t.reshape(-1, orig_shape[-1])  # [N, hidden]
+    if granularity in ("per-token", "per_token"):
+        scale, zero = _per_axis_scale_zero(flat, bits, symmetry, 1)  # per-token (hidden) axis
+    else:  # per-tensor
+        scale, zero = _per_axis_scale_zero(flat.reshape(-1, 1), bits, symmetry, 0)
+    q = _quant_dequant(flat, scale, zero, bits, symmetry)
+    return q.reshape(orig_shape).to(orig_dtype)

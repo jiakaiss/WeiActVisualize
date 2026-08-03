@@ -10,13 +10,16 @@ import pandas as pd
 
 def export_markdown(report, path) -> str:
     """Write a Markdown report; return the written text."""
-    lines = [f"# 量化建议报告 — {report.model}", "", report.summary, ""]
-    lines.append("| module | bits | granularity | mse | outlier_ratio | reason |")
-    lines.append("|---|---|---|---|---|---|")
+    lines = [f"# 量化建议报告 - {report.model}", "", report.summary, ""]
+    lines.append("| module | kind | bits | granularity | symmetry | joint_output_mse "
+                 "| reason |")
+    lines.append("|---|---|---|---|---|---|---|")
     for r in report.recommendations:
+        omse = f"{r.joint_output_mse:.2e}" if r.joint_output_mse == r.joint_output_mse else "-"
         lines.append(
-            f"| {r.module_path} | {r.recommended_bits} | {r.recommended_granularity} "
-            f"| {r.mse:.4e} | {r.outlier_ratio:.2%} | {r.reason} |"
+            f"| {r.module_path} | {r.kind} | {r.recommended_bits} | "
+            f"{r.recommended_granularity} | {r.recommended_symmetry} | "
+            f"{omse} | {r.reason} |"
         )
     text = "\n".join(lines)
     Path(path).write_text(text, encoding="utf-8")

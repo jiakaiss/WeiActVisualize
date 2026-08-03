@@ -42,6 +42,32 @@ def render_histogram_result(h: HistogramResult, name: str = "values") -> go.Figu
     return fig
 
 
+def channel_absmean_bar(channel_stats, name: str = "per-channel abs_mean",
+                        k: float = 5.0) -> go.Figure:
+    """Bar chart of per-channel (hidden-dim) abs_mean; outlier channels red.
+
+    Surfaces the SmoothQuant motivation: a few channels with abnormally large
+    abs_mean that dominate the activation range. ``channel_stats`` is a
+    RunningChannelStats (duck-typed: ``to_result()`` -> dict with abs_mean).
+    """
+    res = channel_stats.to_result() if hasattr(channel_stats, "to_result") else channel_stats
+    am = np.asarray(res.get("abs_mean", []), dtype=np.float64)
+    if am.size == 0:
+        fig = go.Figure()
+        fig.update_layout(title=f"{name} (no data)", template="plotly_white")
+        return fig
+    med = float(np.median(am))
+    colors = ["crimson" if (med > 0 and v > k * med) else "steelblue" for v in am]
+    fig = go.Figure(data=go.Bar(y=am, marker_color=colors, name=name))
+    n_out = sum(1 for c in colors if c == "crimson")
+    fig.update_layout(
+        title=f"{name} (median={med:.3g}, {n_out} outlier channel{'s' if n_out != 1 else ''} > {k}x)",
+        xaxis_title="channel index", yaxis_title="abs_mean",
+        template="plotly_white",
+    )
+    return fig
+
+
 def channel_heatmap(values: Sequence[float], title: str = "per-channel stats") -> go.Figure:
     """Render a 1D heatmap of per-channel values."""
     arr = np.asarray(list(values), dtype=np.float64).reshape(1, -1)
@@ -54,6 +80,46 @@ def layer_stats_heatmap(matrix: List[List[float]], title: str = "per-layer stats
     """Render a 2D heatmap (layers x metric)."""
     fig = go.Figure(data=go.Heatmap(z=matrix, colorscale="Viridis"))
     fig.update_layout(title=title, template="plotly_white")
+    return fig
+
+
+def sensitivity_heatmap(
+    rows: List[dict],
+    metrics: Sequence[str] = ("output_mse", "joint_output_mse",
+                              "weight_kurtosis_max", "heavy_channel_ratio",
+                              "act_channel_severity"),
+    title: str = "per-module sensitivity (each metric normalized)",
+) -> go.Figure:
+    """Normalized [metric x module] heatmap from sensitivity rows.
+
+    Each metric row is independently min-max normalized to [0, 1] for color
+    (metrics have very different scales: mse ~1e-4 vs kurtosis ~tens vs
+    cosine ~1); hover shows the raw value. Modules are ordered as given
+    (the caller pre-sorts the rows).
+    """
+    x_labels = [f"#{i} {r.get('module_path', '').rsplit('.', 1)[-1]}"
+                for i, r in enumerate(rows)]
+    z_norm: List[List[float]] = []
+    hover: List[List[str]] = []
+    for m in metrics:
+        raw = [float(r.get(m, float("nan"))) for r in rows]
+        valid = [v for v in raw if v == v]
+        lo = min(valid) if valid else 0.0
+        hi = max(valid) if valid else 1.0
+        rng = (hi - lo) if hi > lo else 1.0
+        zrow, hrow = [], []
+        for j, v in enumerate(raw):
+            nv = (v - lo) / rng if v == v else float("nan")
+            zrow.append(nv)
+            hrow.append(f"{x_labels[j]}\n{m}: {v:.4g}" if v == v
+                        else f"{x_labels[j]}\n{m}: NaN")
+        z_norm.append(zrow)
+        hover.append(hrow)
+    fig = go.Figure(data=go.Heatmap(
+        z=z_norm, hovertext=hover, colorscale="Viridis", y=list(metrics),
+    ))
+    fig.update_layout(title=title, template="plotly_white",
+                      xaxis_title="module", yaxis_title="metric")
     return fig
 
 

@@ -56,6 +56,19 @@ def test_activation_stats_per_token_and_channel():
     assert len(ch) == 7
 
 
+def test_activation_token_summary():
+    """activation_token_summary builds a StatResult from per-token moments."""
+    from weiacviz.loading.runner import RunningTokenStats
+    from weiacviz.stats.activation_stats import activation_token_summary
+    ts = RunningTokenStats()
+    for _ in range(3):
+        ts.update_moments(torch.randn(2, 5, 8))
+    s = activation_token_summary(ts, "m", "output")
+    assert s.role.value == "activation"
+    assert s.kurtosis == s.kurtosis  # not NaN
+    assert s.shape_label  # non-empty
+
+
 def test_outliers_percentile():
     a = np.array([0.0] * 100 + [100.0])
     res = detect_outliers_percentile(a, percentile=99.0)
