@@ -54,6 +54,24 @@ def test_compare_schemes_returns_rows():
     assert all("mse" in r and "cosine" in r for r in rows)
 
 
+def test_fake_quantize_activation_per_token_shape_and_error():
+    from weiacviz.quant.fake_quant import fake_quantize_activation
+    x = torch.randn(2, 5, 8)  # [batch, seq, hidden]
+    q8 = fake_quantize_activation(x, bits=8, granularity="per-token")
+    assert q8.shape == x.shape
+    # 8-bit per-token is close to the original
+    assert (q8 - x).abs().mean() < 0.01 * x.abs().mean()
+    # 4-bit has larger error than 8-bit
+    q4 = fake_quantize_activation(x, bits=4, granularity="per-token")
+    assert (q4 - x).abs().mean() > (q8 - x).abs().mean()
+
+
+def test_fake_quantize_activation_preserves_dtype():
+    from weiacviz.quant.fake_quant import fake_quantize_activation
+    x = torch.randn(2, 8, dtype=torch.float16)
+    assert fake_quantize_activation(x, bits=8).dtype == torch.float16
+
+
 def test_layer_sensitivity_sorted_and_topk_flagged():
     weights = {
         "a": torch.randn(4, 16),

@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     calibration_seq_length: int = 2048
     calibration_collect_histogram: bool = True
     calibration_histogram_bins: int = 256
+    calibration_collect_token_stats: bool = True
+    calibration_collect_channel_stats: bool = False
 
     # --- Cache / output ---
     cache_dir: Path = Field(default_factory=lambda: Path(".weiacviz_cache"))

@@ -1,11 +1,11 @@
 """Sensitivity analysis: rank layers/channels by quantization loss."""
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 
-from .error_metrics import mse
+from .error_metrics import mse, output_diff
 from .fake_quant import fake_quantize_tensor
 from ..shared.types import QuantConfig
 
@@ -25,6 +25,56 @@ def layer_sensitivity(weights: Dict[str, torch.Tensor], config: QuantConfig,
         for r in rows[:topk]:
             r["top"] = True
     else:
+        for r in rows[:topk]:
+            r["top"] = True
+    return rows
+
+
+def layer_sensitivity_output(
+    model, module_paths: List[str], weights: Dict[str, torch.Tensor],
+    sample_inputs: Dict[str, torch.Tensor], config: QuantConfig,
+    kinds: Optional[Dict[str, str]] = None, topk: int = 0, act_bits: int = 8,
+) -> List[dict]:
+    """Rank modules by quantization-induced output error (descending).
+
+    Reports two output errors per module:
+      - ``output_mse``: weight-only quantization (W4A16/W8A16 view) -- quantize
+        the weight, keep the activation fp.
+      - ``joint_output_mse``: W8A8 -- quantize the weight AND per-token quantize
+        the activation. The gap (joint - weight-only) is the activation-side
+        quantization loss, which is large exactly when outlier channels blow
+        up the per-token scale (SmoothQuant territory).
+
+    ``sample_inputs`` maps module path -> one input activation (from
+    ``capture_sample_inputs``). Modules without a sample input get NaN and
+    sort last. Sorted by ``joint_output_mse`` descending.
+    """
+    kinds = kinds or {}
+    rows: List[dict] = []
+    for path in module_paths:
+        w = weights[path]
+        q = fake_quantize_tensor(w, config)
+        inp = sample_inputs.get(path)
+        out_mse = float("nan")
+        joint_mse = float("nan")
+        if inp is not None:
+            try:
+                module = model.get_submodule(path)
+                out_mse = output_diff(module, q, inp,
+                                      quantize_activation=False)["mse"]
+                joint_mse = output_diff(module, q, inp,
+                                        quantize_activation=True,
+                                        act_bits=act_bits)["mse"]
+            except Exception:  # noqa: BLE001
+                pass
+        rows.append({
+            "module_path": path, "kind": kinds.get(path, ""),
+            "output_mse": out_mse, "joint_output_mse": joint_mse,
+        })
+    rows.sort(key=lambda r: r["joint_output_mse"]
+              if r["joint_output_mse"] == r["joint_output_mse"]
+              else float("-inf"), reverse=True)
+    if topk:
         for r in rows[:topk]:
             r["top"] = True
     return rows
