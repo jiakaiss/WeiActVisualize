@@ -283,6 +283,53 @@ def test_single_pass_calibration_token_stats_without_histogram():
         assert ts.cv == ts.cv  # moments available
 
 
+def test_capture_module_output_sample_returns_output_and_detaches():
+    """capture_module_output_sample returns the module's output activation and
+    unregisters its hook afterwards (no lingering capture)."""
+    from weiacviz.loading.runner import capture_module_output_sample
+
+    class DummyTok:
+        def __call__(self, texts, return_tensors="pt", padding=True,
+                     truncation=True, max_length=2048):
+            n = len(texts)
+            return {"input_ids": torch.ones(n, max_length)}
+
+    model = TinyLlamaLike()
+    path = "layers.0.self_attn.q_proj"
+    out = capture_module_output_sample(model, DummyTok(), path, text="abc", seq_length=8)
+    assert out is not None
+    assert out.shape[-1] == 8  # hidden dim
+    # hook detached: a fresh capture on a new forward still sees the module
+    cap = ActivationCapture([path])
+    cap.attach(model)
+    model(torch.randn(1, 8))
+    assert "output" in cap.buffer.get(path, {})
+    cap.detach()
+
+
+def test_capture_module_output_sample_independent_of_aggregator():
+    """The on-demand sample capture uses its own ActivationCapture; running it
+    does not add counts to a calibration aggregator's separate capture."""
+    from weiacviz.loading.runner import (
+        OnlineAggregator, capture_module_output_sample,  # noqa: F401
+    )
+
+    class DummyTok:
+        def __call__(self, texts, return_tensors="pt", padding=True,
+                     truncation=True, max_length=2048):
+            n = len(texts)
+            return {"input_ids": torch.ones(n, max_length)}
+
+    model = TinyLlamaLike()
+    paths = [m.path for m in resolve_modules(model).modules]
+    texts = ["a b c"] * 4
+    agg = run_calibration(model, DummyTok(), texts, paths, config=None, seq_length=8)
+    count_before = agg.stats[paths[0]]["output"].count
+    # on-demand sample capture uses an independent hook registration
+    _ = capture_module_output_sample(model, DummyTok(), paths[0], text="x", seq_length=8)
+    assert agg.stats[paths[0]]["output"].count == count_before  # unchanged
+
+
 def test_detect_available_backend_returns_valid():
     from weiacviz.loading.model_loader import detect_available_backend
     assert detect_available_backend() in {"cpu", "cuda", "npu"}

@@ -16,6 +16,7 @@ from .charts import (
     comparison_histograms,
     distribution_histogram,
     render_histogram_result,
+    render_token_absmax_violin,
     sensitivity_heatmap,
 )
 from .progress import ProgressReporter, gradio_progress_adapter
@@ -23,7 +24,11 @@ from .structure import build_module_table, build_overview
 from ..loading.calibration import load_calibration_texts
 from ..loading.model_loader import load_model
 from ..loading.module_resolver import resolve_modules
-from ..loading.runner import capture_sample_inputs, run_calibration
+from ..loading.runner import (
+    capture_module_output_sample,
+    capture_sample_inputs,
+    run_calibration,
+)
 from ..loading.weights import get_weight
 from ..quant.fake_quant import fake_quantize_tensor
 from ..quant.scheme_compare import compare_schemes
@@ -34,9 +39,21 @@ from ..shared.config import Settings, get_settings
 from ..shared.types import CaptureConfig, Granularity, QuantConfig, Symmetry
 from ..stats.activation_stats import (
     activation_outlier_channels,
+    activation_stats_per_token,
+    activation_token_outliers,
     activation_token_summary,
 )
 from ..stats.weight_stats import weight_stats
+
+# Single-sample text for the on-demand per-token slice view. Repeated so a real
+# tokenizer yields enough tokens (truncated to seq_length) for a top-k violin;
+# the synthetic test tokenizer ignores the content.
+_ACT_SAMPLE_TEXT = (
+    "The quick brown fox jumps over the lazy dog. "
+    "Large language models are composed of stacked transformer blocks. "
+    "Activation distributions inform quantization suitability decisions. "
+    "Outlier channels dominate the activation range and drive quantization error. "
+) * 8
 
 
 class App:
@@ -121,32 +138,78 @@ class App:
                 f"{n_tok} with per-token stats, {n_hist} with histogram, "
                 f"{n_ch} with per-channel stats.")
 
-    def view_activation(self, module_path: str):
-        """Activation analysis: per-token abs_max distribution (main) +
-        optional global histogram and per-channel outlier (SmoothQuant diag).
+    def view_activation(self, module_path: str, seq_length: int = 512):
+        """Per-token activation analysis at weight-side depth.
 
-        Returns (advice_text, global_hist_fig, per_token_hist_fig,
-        per_channel_fig). per-token moments are always available when token
-        stats were collected; the two histograms need collect_histogram=True
-        and the channel bar needs collect_channel_stats=True.
+        Per-token slice view (violin + shape heatmap) uses an on-demand
+        single-module activation sample -- available after model load, no
+        calibration needed. Per-token abs_max distribution violin + outlier
+        magnitude + global histogram need calibration (collect_histogram /
+        collect_token_stats). Per-channel abs_mean bar needs
+        collect_channel_stats.
+
+        Returns (advice, global_fig, token_absmax_violin, slice_violin,
+        slice_heatmap, per_channel_fig).
         """
-        if self._aggregator is None:
-            raise gr.Error("请先运行校准")
+        if self._model is None:
+            raise gr.Error("请先在「模型加载」tab 加载模型")
         if not module_path:
             raise gr.Error("请先刷新并选择一个 module")
         agg = self._aggregator
-        ts = agg.token_stats.get(module_path, {}).get("output")
+
+        # --- per-token slice view (on-demand sample, no calibration needed) ---
+        slice_violin = go.Figure().update_layout(template="plotly_white")
+        slice_heatmap = go.Figure().update_layout(template="plotly_white")
+        if self._tokenizer is None:
+            slice_violin = slice_violin.update_layout(title="缺少 tokenizer，无法捕获激活样本")
+            slice_heatmap = slice_heatmap.update_layout(title="缺少 tokenizer，无法捕获激活样本")
+        else:
+            try:
+                sample = capture_module_output_sample(
+                    self._model, self._tokenizer, module_path,
+                    text=_ACT_SAMPLE_TEXT, seq_length=int(seq_length),
+                )
+            except Exception:  # noqa: BLE001  forward/shape errors -> placeholder
+                sample = None
+            if sample is None:
+                slice_violin = slice_violin.update_layout(
+                    title=f"未捕获到 {module_path} 的激活样本")
+                slice_heatmap = slice_heatmap.update_layout(
+                    title=f"未捕获到 {module_path} 的激活样本")
+            else:
+                tok_stats = activation_stats_per_token(sample, module_path)
+                slice_violin = channel_violin(
+                    sample, granularity=Granularity.PER_CHANNEL, stats=tok_stats,
+                    name=f"per-token 分布: {module_path}")
+                slice_heatmap = channel_stats_heatmap(
+                    tok_stats, title=f"per-token 形态: {module_path}")
+
+        # --- per-token abs_max distribution + outlier magnitude (calibration) ---
+        ts = agg.token_stats.get(module_path, {}).get("output") if agg else None
         if ts is None or ts.count == 0:
-            raise gr.Error(
-                "该 module 无 per-token 统计，请勾选「采集 per-token 统计」后重新校准")
-        summ = activation_token_summary(ts, module_path, "output")
-        advice_full = (
-            f"per-token abs_max 分布: 形态={summ.shape_label} | "
-            f"mean={ts.mean:.3f} std={ts.std:.3f} "
-            f"kurtosis={ts.kurtosis:.2f} skewness={ts.skewness:.2f}"
-        )
-        # global activation histogram (needs collect_histogram)
-        h = agg.histograms.get(module_path, {}).get("output")
+            token_fig = go.Figure().update_layout(
+                title="未采集 per-token 统计（勾选「采集 per-token 统计」后重新校准）",
+                template="plotly_white")
+            advice = "未采集 per-token 统计（勾选后重新校准）；per-token 切片视图可用"
+        else:
+            summ = activation_token_summary(ts, module_path, "output")
+            outlier_info = activation_token_outliers(ts)
+            token_fig = render_token_absmax_violin(
+                ts, outlier_info=outlier_info,
+                name=f"per-token abs_max: {module_path}")
+            parts = [
+                f"形态={summ.shape_label}",
+                f"mean={ts.mean:.3f} std={ts.std:.3f}",
+                f"kurtosis={ts.kurtosis:.2f} skewness={ts.skewness:.2f}",
+            ]
+            sev = outlier_info.get("severity", float("nan"))
+            ratio = outlier_info.get("outlier_ratio", float("nan"))
+            if sev == sev:
+                parts.append(f"离群比例={ratio:.1%} severity={sev:.2f}")
+            advice = "per-token abs_max | " + " | ".join(parts)
+
+        # --- global activation histogram (needs collect_histogram) ---
+        h = agg.histograms.get(module_path, {}).get("output") if agg else None
         if h is not None:
             global_fig = render_histogram_result(
                 h.to_result(), name=f"activation: {module_path}")
@@ -154,17 +217,9 @@ class App:
             global_fig = go.Figure().update_layout(
                 title="未采集全局直方图（勾选「采集直方图」后重新校准）",
                 template="plotly_white")
-        # per-token abs_max histogram (needs collect_histogram)
-        if ts.abs_max_hist is not None:
-            token_fig = render_histogram_result(
-                ts.abs_max_hist.to_result(),
-                name=f"per-token abs_max: {module_path}")
-        else:
-            token_fig = go.Figure().update_layout(
-                title="未采集 per-token 直方图（勾选「采集直方图」后重新校准）",
-                template="plotly_white")
-        # per-channel outlier bar (needs collect_channel_stats)
-        cs = agg.channel_stats.get(module_path, {}).get("output")
+
+        # --- per-channel outlier bar (needs collect_channel_stats) ---
+        cs = agg.channel_stats.get(module_path, {}).get("output") if agg else None
         if cs is not None and cs.abs_mean is not None:
             channel_fig = channel_absmean_bar(
                 cs, name=f"per-channel abs_mean: {module_path}")
@@ -172,7 +227,8 @@ class App:
             channel_fig = go.Figure().update_layout(
                 title="未采集 per-channel（勾选「激活离群诊断」后重新校准）",
                 template="plotly_white")
-        return advice_full, global_fig, token_fig, channel_fig
+
+        return advice, global_fig, token_fig, slice_violin, slice_heatmap, channel_fig
 
     def scheme_compare_view(self, module_path: str, bits_list, gran_list,
                             sym_list, group_size):
@@ -309,12 +365,12 @@ class App:
         return rows
 
     def run_sensitivity(self, bits: int, sort_by: str, seq_length: int = 128):
-        """Whole-model sensitivity ranking by output_diff (main) + weight MSE.
+        """Whole-model sensitivity ranking by output_diff (main) + weight shape.
 
         See ``_sensitivity_rows`` for the per-module signals. The table shows
-        *why* a module is sensitive in one glance: output_mse high + act_cv high
-        => activation spread; output_mse high + weight_kurtosis high => weight
-        heavy-tail.
+        *why* a module is sensitive in one glance: ``output_mse`` high +
+        ``weight_kurtosis_max`` high => weight heavy-tail; ``joint_output_mse``
+        远大于 ``output_mse`` => activation-side quantization loss.
         """
         if self._model is None:
             raise gr.Error("请先在「模型加载」tab 加载模型")
@@ -413,9 +469,8 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                           cal_out)
 
             gr.Markdown(
-                "### 激活分布分析（per-token 为主；per-channel 离群为 SmoothQuant 专项）\n"
-                "per-token abs_max 分布反映激活动态范围形态（重尾 = 少数 token 量程大）。"
-                "激活量化默认 per-token（业界 W8A8 标准）；per-channel 离群通道则提示是否需要 SmoothQuant 迁移。"
+                "激活分布分析：per-token 切片形态 + per-token abs_max 分布与离群幅度；"
+                "per-channel 离群为 SmoothQuant 专项。"
             )
             act_mod = gr.Dropdown([], label="module")
 
@@ -428,10 +483,14 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             act_advice = gr.Textbox(label="per-token abs_max 分布", lines=2)
             with gr.Row():
                 act_global = gr.Plot(label="激活全局直方图")
-                act_token = gr.Plot(label="per-token abs_max 分布")
+                act_token = gr.Plot(label="per-token abs_max 分布 violin")
+            with gr.Row():
+                act_slice_vio = gr.Plot(label="per-token 切片 violin（top-k by kurtosis）")
+                act_slice_hm = gr.Plot(label="per-token 形态热力图")
             act_channel = gr.Plot(label="per-channel abs_mean 离群通道")
             act_btn.click(app_obj.view_activation, [act_mod],
-                          [act_advice, act_global, act_token, act_channel])
+                          [act_advice, act_global, act_token,
+                           act_slice_vio, act_slice_hm, act_channel])
 
         with gr.Tab("量化模拟"):
             q_mod = gr.Dropdown([], label="module")
@@ -466,12 +525,10 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
 
         with gr.Tab("敏感性总览"):
             gr.Markdown(
-                "全模型量化敏感性排序（默认按 **joint_output_mse**：W8A8 权重+激活联合量化后的层输出误差）。\n"
+                "全模型量化敏感性排序（默认按 **joint_output_mse**：W8A8 权重+激活联合量化层输出误差）。"
                 "``output_mse``=只权重量化(W4A16)，``joint_output_mse``=权重+per-token激活(W8A8)，"
-                "**差值≈激活量化损失**。\n"
-                "看「为什么难量化」：``heavy_channel_ratio`` 高 = 权重有重尾通道（per-group 可能更优，max kurtosis 看极端程度）；"
-                "``act_channel_severity`` 高 / joint 远大于 output_mse = 激活有离群通道（AWQ/SmoothQuant 类算法可能有收益，诊断信号不替你选算法）。"
-                "需先加载模型；若已校准（勾选「激活离群诊断」）则同时显示激活离群 severity。"
+                "差值≈激活量化损失。``heavy_channel_ratio`` 高=权重重尾通道；"
+                "``act_channel_severity`` 高=激活离群通道。需先加载模型；若已校准则同时显示激活离群 severity。"
             )
             with gr.Row():
                 sens_bits = gr.Dropdown([4, 8], value=4, label="参考 bits")
@@ -494,9 +551,7 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             gr.Markdown(
                 "基于 output_diff 敏感性 + 权重形态 + 激活离群程度，"
                 "给出每层「为什么难量化 + 怎么量化(bits/粒度/对称性)」的诊断。"
-                "激活量化默认 per-token（业界 W8A8 标准）。"
-                "reason 里的「激活离群通道」「激活量化损失占比」是诊断信号，"
-                "提示哪些 PTQ 算法（AWQ/SmoothQuant/GPTQ 等）可能有收益，但不替你选算法。"
+                "reason 中的「激活离群通道」「激活量化损失占比」为诊断信号，不替你选算法。"
                 "需先加载模型；若已校准则同时用上激活信息。"
             )
             rep_bits = gr.Dropdown([4, 8], value=4, label="参考 bits（敏感性评估用）")

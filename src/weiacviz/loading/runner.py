@@ -499,3 +499,38 @@ def capture_sample_inputs(model, tokenizer, module_paths: List[str],
         if was_training:
             model.train()
     return inputs
+
+
+def capture_module_output_sample(model, tokenizer, module_path: str,
+                                 text: str = "", seq_length: int = 512,
+                                 ) -> Optional[torch.Tensor]:
+    """Run one forward pass and return one module's output activation.
+
+    Used by per-token slice visualization: provides a real activation sample
+    for the viewed module so per-token hidden-dim distributions can be rendered
+    with the same violin + heatmap pipeline as weights. Memory is one tensor
+    of ``[batch, seq, hidden]``; the caller releases it when done.
+
+    Uses an independent ``ActivationCapture`` registration (output only), so it
+    does not touch any calibration ``OnlineAggregator``. Returns ``None`` if the
+    module produced no capturable output.
+    """
+    cap = ActivationCapture([module_path], capture_inputs=False, capture_outputs=True)
+    cap.attach(model)
+    device = getattr(model, "device", torch.device("cpu"))
+    was_training = getattr(model, "training", False)
+    model.eval()
+    try:
+        enc = tokenizer([text] if text else ["test"], return_tensors="pt",
+                        padding=True, truncation=True, max_length=seq_length)
+        input_ids = enc["input_ids"].to(device)
+        with torch.no_grad():
+            model(input_ids)
+        entry = cap.buffer.get(module_path, {})
+        if "output" not in entry:
+            return None
+        return entry["output"]
+    finally:
+        cap.detach()
+        if was_training:
+            model.train()

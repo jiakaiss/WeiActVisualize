@@ -42,6 +42,61 @@ def render_histogram_result(h: HistogramResult, name: str = "values") -> go.Figu
     return fig
 
 
+def render_token_absmax_violin(token_stats, outlier_info=None,
+                               name: str = "per-token abs_max",
+                               max_points: int = 4000) -> go.Figure:
+    """Render the per-token abs_max distribution as a violin (KDE + IQR +
+    median), reconstructed from the online histogram by weighted sampling of
+    bin centers. Outlier threshold / max are marked with horizontal lines.
+
+    The per-token abs_max distribution is only available as (counts, bin_edges)
+    from ``RunningTokenStats`` (online, O(1)); raw per-token scalars are not
+    retained. Sampling bin centers weighted by counts faithfully reconstructs
+    the KDE for visualization; exact shape metrics come from the online raw
+    moments and are displayed separately (e.g. in the advice text).
+    """
+    hist = getattr(token_stats, "abs_max_hist", None)
+    if hist is None:
+        fig = go.Figure()
+        fig.update_layout(
+            title=f"{name}（未采集 per-token 直方图，勾选「采集直方图」后重新校准）",
+            template="plotly_white")
+        return fig
+    hr = hist.to_result()
+    counts = np.asarray(hr.counts, dtype=np.float64)
+    edges = np.asarray(hr.bin_edges, dtype=np.float64)
+    total = float(counts.sum())
+    if total == 0:
+        fig = go.Figure()
+        fig.update_layout(title=f"{name} (no data)", template="plotly_white")
+        return fig
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    probs = counts / counts.sum()
+    probs = probs / probs.sum()  # guard float drift for rng.choice
+    n = min(max_points, int(total))
+    rng = np.random.default_rng(0)
+    sample = rng.choice(centers, size=n, p=probs)
+    fig = go.Figure()
+    fig.add_trace(go.Violin(
+        y=sample, name=name, points=False, box_visible=True,
+        meanline_visible=True, showlegend=False,
+    ))
+    if outlier_info is not None:
+        thr = float(outlier_info.get("threshold", float("nan")))
+        max_abs = float(outlier_info.get("max_abs", float("nan")))
+        if thr == thr:
+            fig.add_hline(y=thr, line=dict(color="orange", dash="dash"),
+                          annotation_text=f"阈值 {thr:.3g}")
+        if max_abs == max_abs:
+            fig.add_hline(y=max_abs, line=dict(color="crimson", dash="dot"),
+                          annotation_text=f"max {max_abs:.3g}")
+    fig.update_layout(
+        title=f"{name} 分布 (violin)", template="plotly_white",
+        xaxis_visible=False, yaxis_title="per-token abs_max",
+    )
+    return fig
+
+
 def channel_absmean_bar(channel_stats, name: str = "per-channel abs_mean",
                         k: float = 5.0) -> go.Figure:
     """Bar chart of per-channel (hidden-dim) abs_mean; outlier channels red.
