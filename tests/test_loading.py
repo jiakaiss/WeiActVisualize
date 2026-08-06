@@ -219,23 +219,6 @@ def test_running_token_stats_online_matches_one_shot():
     assert abs(ts.skewness - skewness(all_absmax)) < 1e-3
 
 
-def test_running_channel_stats_finds_outlier_channels():
-    """Per-channel abs_mean aggregation surfaces injected outlier channels."""
-    from weiacviz.loading.runner import RunningChannelStats
-    from weiacviz.stats.activation_stats import activation_outlier_channels
-    cs = RunningChannelStats()
-    base = torch.randn(4, 4, 8)
-    for _ in range(3):
-        cs.update(base)
-    outlier = torch.randn(2, 4, 8)
-    outlier[..., 3] *= 25
-    outlier[..., 6] *= 20
-    cs.update(outlier)
-    res = activation_outlier_channels(cs)
-    assert set(res["top_channels"][:2]) == {3, 6}
-    assert res["severity"] > 1.0
-
-
 def test_two_pass_calibration_collects_token_histogram():
     """collect_histogram + collect_token_stats builds a per-token abs_max
     histogram whose counts equal the token count (no out-of-range drops)."""

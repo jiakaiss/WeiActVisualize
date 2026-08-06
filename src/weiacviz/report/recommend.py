@@ -1,15 +1,14 @@
 """Generate quantization suitability recommendations from sensitivity + shape.
 
-Block D rule engine: combines W8A8 joint output sensitivity (block C,
-weight + per-token activation quantization), weight shape (heavy channels),
-and activation outlier severity (block A, diagnostic) to give a per-module
-recommendation with a readable "why + how" reason.
+Rule engine: combines W8A8 joint output sensitivity (weight + per-token
+activation quantization) and weight shape (heavy channels) to give a
+per-module recommendation with a readable "why + how" reason.
 
 This is a distribution-diagnosis tool, not an algorithm recommender: the
 reason describes *why* a layer is hard to quantize (weight heavy channels,
-activation outliers, activation-loss share) so the user can judge which PTQ
-algorithm (GPTQ / AWQ / SmoothQuant / ...) is likely to help. Activation
-quantization is assumed per-token (industry W8A8 default).
+activation-loss share) so the user can judge which PTQ algorithm (GPTQ / AWQ
+/ SmoothQuant / ...) is likely to help. Activation quantization is assumed
+per-token (industry W8A8 default).
 """
 from __future__ import annotations
 
@@ -24,7 +23,6 @@ from ..shared.types import QuantConfig
 HEAVY_TAIL_KURTOSIS = 3.0             # per-channel excess kurtosis > 3 => "heavy" channel
 HEAVY_CHANNEL_RATIO_THRESHOLD = 0.05  # >5% heavy channels => per-group worth it
 SKEWNESS_THRESHOLD = 0.5              # |skew| > 0.5 => asymmetric quant may help
-ACTIVATION_OUTLIER_NOTABLE = 5.0      # severity above this => notable act outliers (diagnostic)
 
 
 @dataclass
@@ -38,7 +36,6 @@ class ModuleRecommendation:
     joint_output_mse: float = float("nan")  # W8A8 (weight + per-token act)
     weight_kurtosis_max: float = float("nan")   # max per-channel excess kurtosis
     heavy_channel_ratio: float = float("nan")   # fraction of channels with kurtosis > 3
-    act_channel_severity: float = float("nan")  # activation outlier severity (diagnostic)
     reason: str = ""
 
 
@@ -61,10 +58,10 @@ def recommend(
 ) -> RecommendationReport:
     """Produce per-module quantization recommendations.
 
-    Each ``sensitivity_row`` carries (from blocks A+C): ``module_path``,
+    Each ``sensitivity_row`` carries: ``module_path``,
     ``kind``, ``output_mse`` (weight-only), ``joint_output_mse`` (W8A8),
-    ``weight_kurtosis_max``, ``heavy_channel_ratio``, ``weight_skewness``,
-    and ``act_channel_severity``. Missing/NaN degrade gracefully.
+    ``weight_kurtosis_max``, ``heavy_channel_ratio``, ``weight_skewness``.
+    Missing/NaN degrade gracefully.
 
     Sensitivity driver is ``joint_output_mse`` (W8A8) -- it already includes
     activation quantization loss.
@@ -75,9 +72,9 @@ def recommend(
       - low sensitivity                                        -> W4 / per-channel
       - |weight skew| > 0.5                                    -> asymmetric
 
-    The reason also reports activation-loss share and activation outlier
-    severity as *diagnostic* signals (which PTQ algorithm may help), but does
-    NOT recommend a specific algorithm.
+    The reason also reports activation-loss share as a *diagnostic* signal
+    (which PTQ algorithm may help), but does NOT recommend a specific
+    algorithm.
     """
     joint_mses = [r["joint_output_mse"] for r in sensitivity_rows
                   if _is_num(r.get("joint_output_mse"))]
@@ -92,14 +89,11 @@ def recommend(
         w_kurt_max = row.get("weight_kurtosis_max", float("nan"))
         heavy_ratio = row.get("heavy_channel_ratio", float("nan"))
         w_skew = row.get("weight_skewness", float("nan"))
-        ch_sev = row.get("act_channel_severity", float("nan"))
 
         high_sens = _is_num(joint_mse) and joint_mse > median_joint
         has_heavy_channels = (_is_num(heavy_ratio)
                               and heavy_ratio > HEAVY_CHANNEL_RATIO_THRESHOLD)
         skew = _is_num(w_skew) and abs(w_skew) > SKEWNESS_THRESHOLD
-        notable_act_outliers = (_is_num(ch_sev)
-                                and ch_sev > ACTIVATION_OUTLIER_NOTABLE)
         is_down_or_gate = kind == "mlp" and (
             path.endswith("down_proj") or path.endswith("gate_proj"))
 
@@ -126,10 +120,6 @@ def recommend(
             why.append(f"权重重尾通道占比{heavy_ratio:.1%}(max kurtosis={w_kurt_max:.1f})")
         if skew:
             why.append(f"权重偏态(skew={w_skew:.2f})")
-        if notable_act_outliers:
-            # diagnostic: notable activation outliers hint that AWQ/SmoothQuant
-            # (which target outlier channels) may help -- but we don't pick one.
-            why.append(f"激活离群通道(severity={ch_sev:.1f})")
         if is_down_or_gate:
             why.append("MLP down/gate 投影已知更敏感")
         how = f"W{bits} {gran} {sym} | 激活 per-token"
@@ -141,7 +131,7 @@ def recommend(
             recommended_symmetry=sym,
             output_mse=out_mse, joint_output_mse=joint_mse,
             weight_kurtosis_max=w_kurt_max, heavy_channel_ratio=heavy_ratio,
-            act_channel_severity=ch_sev, reason=reason,
+            reason=reason,
         ))
 
     n4 = sum(1 for r in recs if r.recommended_bits == 4)

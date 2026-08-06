@@ -20,7 +20,7 @@
 - 清理 UI 冗余 / 过时说明文本。
 
 **Non-Goals:**
-- per-channel（hidden 维）激活形态在线矩（保持现状 SmoothQuant bar 诊断）。
+- per-channel（hidden 维）激活分析整体移除（`RunningChannelStats` / `activation_outlier_channels` / `channel_absmean_bar` / `collect_channel_stats` / 敏感性与报告的 `act_channel_severity`）：per-channel 激活量化无推理引擎支持，作量化粒度无意义；其唯一价值（离群通道 = SmoothQuant 诊断）不足以维持独立链路。激活分析聚焦 per-token。
 - 激活量化前后对比、`distance.py` 改造、结果落盘缓存。
 - input/output 对齐（当前 `view_activation` 看 output；W8A8 实际量化 input。本变更不改这一点，留作后续）。
 

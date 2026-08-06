@@ -30,10 +30,6 @@
 ### Requirement: 离群值检测
 系统 SHALL 基于百分位或 Z-score 检测权重/激活中的离群值，并报告离群值的比例与位置。对 per-token abs_max 分布，系统 SHALL 量化离群 token 的比例、severity（最大幅值 / 中位幅值）与最大幅值。
 
-#### Scenario: 检测激活离群通道
-- **WHEN** 请求某层激活的离群值分析（百分位 99.9%）
-- **THEN** 系统返回超过阈值的通道索引、离群比例与幅值
-
 #### Scenario: 量化 per-token 离群幅度
 - **WHEN** 请求某 module 激活的 per-token abs_max 分布离群分析
 - **THEN** 系统返回离群 token 比例、severity（最大 abs_max / 中位 abs_max）与最大 abs_max 幅值

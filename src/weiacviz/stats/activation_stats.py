@@ -129,36 +129,6 @@ def activation_token_summary(token_stats, module_path: str,
     )
 
 
-def activation_outlier_channels(channel_stats, k: float = 5.0) -> dict:
-    """Detect outlier hidden channels by per-channel abs_mean (SmoothQuant diag).
-
-    ``channel_stats`` is duck-typed (a RunningChannelStats) or its to_result()
-    dict. Returns outlier_ratio (fraction of channels with abs_mean > k*median),
-    severity (max(abs_mean)/median(abs_mean)), and the top-10 channel indices.
-    High severity / outlier_ratio => a few channels dominate the activation
-    range => SmoothQuant (outlier migration) may help.
-    """
-    res = channel_stats.to_result() if hasattr(channel_stats, "to_result") else channel_stats
-    if not res or not res.get("abs_mean"):
-        return {"outlier_ratio": float("nan"), "severity": float("nan"),
-                "top_channels": [], "median_abs_mean": float("nan")}
-    am = np.asarray(res["abs_mean"], dtype=np.float64)
-    if am.size == 0:
-        return {"outlier_ratio": float("nan"), "severity": float("nan"),
-                "top_channels": [], "median_abs_mean": float("nan")}
-    med = float(np.median(am))
-    if med <= 0:
-        return {"outlier_ratio": 0.0, "severity": float("nan"),
-                "top_channels": [], "median_abs_mean": med}
-    mask = am > k * med
-    return {
-        "outlier_ratio": float(mask.sum() / am.size),
-        "severity": float(am.max() / med),
-        "top_channels": np.argsort(am)[::-1][:10].tolist(),
-        "median_abs_mean": med,
-    }
-
-
 def activation_token_outliers(token_stats, method: str = "zscore",
                               k: float = 3.0, percentile: float = 99.0) -> dict:
     """Quantify outlier-token magnitude on the per-token abs_max distribution.

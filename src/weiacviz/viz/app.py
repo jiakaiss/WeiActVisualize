@@ -9,7 +9,6 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from .charts import (
-    channel_absmean_bar,
     channel_heatmap,
     channel_stats_heatmap,
     channel_violin,
@@ -38,7 +37,6 @@ from ..report.recommend import recommend
 from ..shared.config import Settings, get_settings
 from ..shared.types import CaptureConfig, Granularity, QuantConfig, Symmetry
 from ..stats.activation_stats import (
-    activation_outlier_channels,
     activation_stats_per_token,
     activation_token_outliers,
     activation_token_summary,
@@ -106,7 +104,7 @@ class App:
 
     def run_calib(self, dataset: str, num_samples: int, batch_size: int,
                   collect_histogram: bool, num_bins: int,
-                  collect_token_stats: bool, collect_channel_stats: bool,
+                  collect_token_stats: bool,
                   progress=gr.Progress()):
         paths = [m.path for m in self._modules]
         texts = load_calibration_texts(dataset, num_samples=num_samples)
@@ -118,7 +116,6 @@ class App:
             collect_histogram=bool(collect_histogram),
             num_bins=int(num_bins),
             collect_token_stats=bool(collect_token_stats),
-            collect_channel_stats=bool(collect_channel_stats),
         )
         n_hist = sum(
             1 for p in paths
@@ -129,14 +126,8 @@ class App:
             if self._aggregator.token_stats.get(p, {}).get("output") is not None
             and self._aggregator.token_stats[p]["output"].count > 0
         )
-        n_ch = sum(
-            1 for p in paths
-            if self._aggregator.channel_stats.get(p, {}).get("output") is not None
-            and self._aggregator.channel_stats[p]["output"].count > 0
-        )
         return (f"Calibration done. {len(paths)} modules captured, "
-                f"{n_tok} with per-token stats, {n_hist} with histogram, "
-                f"{n_ch} with per-channel stats.")
+                f"{n_tok} with per-token stats, {n_hist} with histogram.")
 
     def view_activation(self, module_path: str, seq_length: int = 512):
         """Per-token activation analysis at weight-side depth.
@@ -145,11 +136,10 @@ class App:
         single-module activation sample -- available after model load, no
         calibration needed. Per-token abs_max distribution violin + outlier
         magnitude + global histogram need calibration (collect_histogram /
-        collect_token_stats). Per-channel abs_mean bar needs
-        collect_channel_stats.
+        collect_token_stats).
 
         Returns (advice, global_fig, token_absmax_violin, slice_violin,
-        slice_heatmap, per_channel_fig).
+        slice_heatmap).
         """
         if self._model is None:
             raise gr.Error("请先在「模型加载」tab 加载模型")
@@ -218,17 +208,7 @@ class App:
                 title="未采集全局直方图（勾选「采集直方图」后重新校准）",
                 template="plotly_white")
 
-        # --- per-channel outlier bar (needs collect_channel_stats) ---
-        cs = agg.channel_stats.get(module_path, {}).get("output") if agg else None
-        if cs is not None and cs.abs_mean is not None:
-            channel_fig = channel_absmean_bar(
-                cs, name=f"per-channel abs_mean: {module_path}")
-        else:
-            channel_fig = go.Figure().update_layout(
-                title="未采集 per-channel（勾选「激活离群诊断」后重新校准）",
-                template="plotly_white")
-
-        return advice, global_fig, token_fig, slice_violin, slice_heatmap, channel_fig
+        return advice, global_fig, token_fig, slice_violin, slice_heatmap
 
     def scheme_compare_view(self, module_path: str, bits_list, gran_list,
                             sym_list, group_size):
@@ -279,8 +259,8 @@ class App:
 
     def build_report(self, bits: int, seq_length: int = 128):
         """Build a per-module quantization recommendation report over the
-        whole model. Block D: uses output_diff sensitivity + weight shape +
-        activation CV / channel severity, and emits a 'why + how' reason.
+        whole model. Uses output_diff sensitivity + weight shape, and emits a
+        'why + how' reason.
         """
         if self._model is None:
             raise gr.Error("请先在「模型加载」tab 加载模型后再生成报告")
@@ -298,7 +278,7 @@ class App:
             "module": r.module_path, "kind": r.kind,
             "bits": r.recommended_bits, "granularity": r.recommended_granularity,
             "symmetry": r.recommended_symmetry,
-            "joint_output_mse": r.joint_output_mse, "act_severity": r.act_channel_severity,
+            "joint_output_mse": r.joint_output_mse,
             "reason": r.reason,
         } for r in rep.recommendations])
         return df, rep.summary
@@ -323,10 +303,9 @@ class App:
     def _sensitivity_rows(self, bits: int, seq_length: int = 128) -> List[dict]:
         """Build enriched per-module sensitivity rows for the whole model.
 
-        Combines output_diff sensitivity (block C) with per-channel weight
-        shape (kurtosis/skewness median) and, if calibration was run, per-token
-        activation CV and per-channel outlier severity (block A). Shared by the
-        sensitivity overview and the recommendation report.
+        Combines output_diff sensitivity with per-channel weight shape
+        (kurtosis/skewness median). Shared by the sensitivity overview and the
+        recommendation report.
         """
         paths = [m.path for m in self._modules]
         weights = {p: get_weight(self._model, p) for p in paths}
@@ -357,11 +336,6 @@ class App:
                 r["weight_kurtosis_max"] = float("nan")
                 r["heavy_channel_ratio"] = float("nan")
             r["weight_skewness"] = float(np.median(skews)) if skews else float("nan")
-            r["act_channel_severity"] = float("nan")
-            if self._aggregator is not None:
-                cs = self._aggregator.channel_stats.get(p, {}).get("output")
-                if cs is not None and cs.abs_mean is not None:
-                    r["act_channel_severity"] = activation_outlier_channels(cs)["severity"]
         return rows
 
     def run_sensitivity(self, bits: int, sort_by: str, seq_length: int = 128):
@@ -383,8 +357,7 @@ class App:
         rows.sort(key=lambda r: r[key_field] if r[key_field] == r[key_field]
                   else float("-inf"), reverse=True)
         display = ["module_path", "kind", "output_mse", "joint_output_mse",
-                   "weight_kurtosis_max", "heavy_channel_ratio",
-                   "act_channel_severity"]
+                   "weight_kurtosis_max", "heavy_channel_ratio"]
         df = pd.DataFrame(rows)[display] if rows else pd.DataFrame(columns=display)
         hm = sensitivity_heatmap(rows)
         return df, hm
@@ -458,19 +431,16 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                                   label="采集直方图（两遍校准，较慢；per-token 直方图也依赖此项）")
             tok_in = gr.Checkbox(value=app_obj.settings.calibration_collect_token_stats,
                                  label="采集 per-token 统计（默认，单遍，O(1) 内存）")
-            ch_in = gr.Checkbox(value=app_obj.settings.calibration_collect_channel_stats,
-                                label="采集 per-channel 离群通道（激活离群诊断，O(hidden)）")
             hbins_in = gr.Slider(16, 1024, value=app_obj.settings.calibration_histogram_bins,
                                  step=16, label="histogram bins")
             cal_btn = gr.Button("运行校准")
             cal_out = gr.Textbox(label="状态")
             cal_btn.click(app_obj.run_calib,
-                          [ds_in, ns_in, bs_in, hist_in, hbins_in, tok_in, ch_in],
+                          [ds_in, ns_in, bs_in, hist_in, hbins_in, tok_in],
                           cal_out)
 
             gr.Markdown(
-                "激活分布分析：per-token 切片形态 + per-token abs_max 分布与离群幅度；"
-                "per-channel 离群为 SmoothQuant 专项。"
+                "激活分布分析：per-token 切片形态 + per-token abs_max 分布与离群幅度。"
             )
             act_mod = gr.Dropdown([], label="module")
 
@@ -487,10 +457,9 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             with gr.Row():
                 act_slice_vio = gr.Plot(label="per-token 切片 violin（top-k by kurtosis）")
                 act_slice_hm = gr.Plot(label="per-token 形态热力图")
-            act_channel = gr.Plot(label="per-channel abs_mean 离群通道")
             act_btn.click(app_obj.view_activation, [act_mod],
                           [act_advice, act_global, act_token,
-                           act_slice_vio, act_slice_hm, act_channel])
+                           act_slice_vio, act_slice_hm])
 
         with gr.Tab("量化模拟"):
             q_mod = gr.Dropdown([], label="module")
@@ -527,8 +496,7 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             gr.Markdown(
                 "全模型量化敏感性排序（默认按 **joint_output_mse**：W8A8 权重+激活联合量化层输出误差）。"
                 "``output_mse``=只权重量化(W4A16)，``joint_output_mse``=权重+per-token激活(W8A8)，"
-                "差值≈激活量化损失。``heavy_channel_ratio`` 高=权重重尾通道；"
-                "``act_channel_severity`` 高=激活离群通道。需先加载模型；若已校准则同时显示激活离群 severity。"
+                "差值≈激活量化损失。``heavy_channel_ratio`` 高=权重重尾通道。需先加载模型。"
             )
             with gr.Row():
                 sens_bits = gr.Dropdown([4, 8], value=4, label="参考 bits")
@@ -537,10 +505,8 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
             sens_btn = gr.Button("运行敏感性分析")
             sens_table = gr.Dataframe(
                 headers=["module_path", "kind", "output_mse", "joint_output_mse",
-                         "weight_kurtosis_max", "heavy_channel_ratio",
-                         "act_channel_severity"],
-                datatype=["str", "str", "number", "number", "number", "number",
-                          "number"],
+                         "weight_kurtosis_max", "heavy_channel_ratio"],
+                datatype=["str", "str", "number", "number", "number", "number"],
                 interactive=False, wrap=True,
             )
             sens_hm = gr.Plot(label="层 × 指标 热力图（每行独立归一化）")
@@ -549,19 +515,19 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
 
         with gr.Tab("报告"):
             gr.Markdown(
-                "基于 output_diff 敏感性 + 权重形态 + 激活离群程度，"
+                "基于 output_diff 敏感性 + 权重形态，"
                 "给出每层「为什么难量化 + 怎么量化(bits/粒度/对称性)」的诊断。"
-                "reason 中的「激活离群通道」「激活量化损失占比」为诊断信号，不替你选算法。"
-                "需先加载模型；若已校准则同时用上激活信息。"
+                "reason 中的「激活量化损失占比」为诊断信号，不替你选算法。"
+                "需先加载模型。"
             )
             rep_bits = gr.Dropdown([4, 8], value=4, label="参考 bits（敏感性评估用）")
             rep_btn = gr.Button("生成报告")
             rep_summary = gr.Textbox(label="概览")
             rep_table = gr.Dataframe(
                 headers=["module", "kind", "bits", "granularity", "symmetry",
-                         "joint_output_mse", "act_severity", "reason"],
+                         "joint_output_mse", "reason"],
                 datatype=["str", "str", "number", "str", "str",
-                          "number", "number", "str"],
+                          "number", "str"],
                 interactive=False, wrap=True,
             )
             with gr.Row():

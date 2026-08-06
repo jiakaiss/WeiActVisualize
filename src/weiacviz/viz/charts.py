@@ -97,32 +97,6 @@ def render_token_absmax_violin(token_stats, outlier_info=None,
     return fig
 
 
-def channel_absmean_bar(channel_stats, name: str = "per-channel abs_mean",
-                        k: float = 5.0) -> go.Figure:
-    """Bar chart of per-channel (hidden-dim) abs_mean; outlier channels red.
-
-    Surfaces the SmoothQuant motivation: a few channels with abnormally large
-    abs_mean that dominate the activation range. ``channel_stats`` is a
-    RunningChannelStats (duck-typed: ``to_result()`` -> dict with abs_mean).
-    """
-    res = channel_stats.to_result() if hasattr(channel_stats, "to_result") else channel_stats
-    am = np.asarray(res.get("abs_mean", []), dtype=np.float64)
-    if am.size == 0:
-        fig = go.Figure()
-        fig.update_layout(title=f"{name} (no data)", template="plotly_white")
-        return fig
-    med = float(np.median(am))
-    colors = ["crimson" if (med > 0 and v > k * med) else "steelblue" for v in am]
-    fig = go.Figure(data=go.Bar(y=am, marker_color=colors, name=name))
-    n_out = sum(1 for c in colors if c == "crimson")
-    fig.update_layout(
-        title=f"{name} (median={med:.3g}, {n_out} outlier channel{'s' if n_out != 1 else ''} > {k}x)",
-        xaxis_title="channel index", yaxis_title="abs_mean",
-        template="plotly_white",
-    )
-    return fig
-
-
 def channel_heatmap(values: Sequence[float], title: str = "per-channel stats") -> go.Figure:
     """Render a 1D heatmap of per-channel values."""
     arr = np.asarray(list(values), dtype=np.float64).reshape(1, -1)
@@ -141,8 +115,7 @@ def layer_stats_heatmap(matrix: List[List[float]], title: str = "per-layer stats
 def sensitivity_heatmap(
     rows: List[dict],
     metrics: Sequence[str] = ("output_mse", "joint_output_mse",
-                              "weight_kurtosis_max", "heavy_channel_ratio",
-                              "act_channel_severity"),
+                              "weight_kurtosis_max", "heavy_channel_ratio"),
     title: str = "per-module sensitivity (each metric normalized)",
 ) -> go.Figure:
     """Normalized [metric x module] heatmap from sensitivity rows.

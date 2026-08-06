@@ -28,3 +28,12 @@
 - [x] 5.1 集成测试 `tests/test_integration.py`：加载 Qwen2-0.5B -> `view_activation` 返回全部图；未校准时切片视图可用、abs_max violin 占位；校准后 abs_max violin + 离群标记可用
 - [x] 5.2 `pytest` 全量通过
 - [ ] 5.3 手动启动 Gradio（Qwen2-0.5B, CPU）确认 per-token 切片 violin / 形态热力图 / abs_max violin 离群标记正常渲染
+
+## 6. 移除 per-channel（hidden 维）激活分析
+
+- [x] 6.1 删除 `loading/runner.py` 的 `RunningChannelStats` 类、`OnlineAggregator.channel_stats` / `collect_channel_stats`、`run_calibration` 的 `collect_channel_stats` 参数
+- [x] 6.2 删除 `stats/activation_stats.py` 的 `activation_outlier_channels`、`viz/charts.py` 的 `channel_absmean_bar`
+- [x] 6.3 `viz/app.py`：`view_activation` 返回改 5 元组（去 per-channel bar）；`run_calib` 去 `collect_channel_stats`；`_sensitivity_rows` / `run_sensitivity` / `build_report` 去 `act_channel_severity` / `act_severity`；UI 去「采集 per-channel」勾选项与 per-channel plot；`sensitivity_heatmap` 默认指标去 `act_channel_severity`
+- [x] 6.4 `report/recommend.py`：`ModuleRecommendation` 去 `act_channel_severity` 字段、`recommend` 去 `notable_act_outliers` / 「激活离群通道」reason
+- [x] 6.5 `shared/config.py`：删 `calibration_collect_channel_stats`
+- [x] 6.6 删/改测试：`test_loading` 的 `test_running_channel_stats_*`、`test_report` 的 `act_channel_severity` 与 `test_recommend_act_outliers_in_reason`、`test_integration` 的 view_activation 5 元组与列断言；`pytest` 全量通过
