@@ -4,10 +4,11 @@
 - [x] 1.2 新增 `activation_token_outliers(token_stats, method="percentile"|"zscore", k/percentile)`：返回 `{outlier_ratio, severity(max/median), max_abs, threshold, method}`；百分位经 `_hist_percentile`，z-score 用在线 mean/std
 - [x] 1.3 单测 `tests/test_stats.py`：per-token 形态指标正确性（重尾/正态合成数据）、零方差 token 鲁棒、离群幅度计算（severity/max_abs）
 
-## 2. 捕获层：按需单 module 激活样本
+## 2. 捕获层：按需单 module **输入**激活样本
 
-- [x] 2.1 在 `loading/runner.py` 新增 `capture_module_output_sample(model, tokenizer, module_path, text, seq_length=512)`：复用 `ActivationCapture`（仅 output），单条样本，hook 用后卸载，返回 output 激活张量
-- [x] 2.2 单测 `tests/test_loading.py`：捕获返回 output 张量、shape 与 seq_length 对应、hook 已卸载、独立 hook 不污染校准 aggregator
+- [x] 2.1 复用既有 `capture_sample_inputs(model, tokenizer, [module_path], text, seq_length)` 捕获选中 module 的**输入**激活（W8A8 量化的是 Linear 输入 x）；不再新增 output 捕获函数
+- [x] 2.2 ~单测~：捕获复用已有 `capture_sample_inputs` 测试；`view_activation` 改取 input role（`agg.token_stats/histograms[p]["input"]`）
+- [x] 2.3 3D 展平：`view_activation` 将 `[batch, seq, hidden]` reshape 为 `[N, hidden]` 再传 `channel_violin`，否则按 batch 切片只得 1 个切片；单测 `test_per_token_slice_flattens_3d_activation` 验证多切片
 
 ## 3. 图表层：per-token abs_max 分布 violin 与切片复用
 

@@ -24,7 +24,6 @@ from ..loading.calibration import load_calibration_texts
 from ..loading.model_loader import load_model
 from ..loading.module_resolver import resolve_modules
 from ..loading.runner import (
-    capture_module_output_sample,
     capture_sample_inputs,
     run_calibration,
 )
@@ -155,38 +154,46 @@ class App:
             slice_heatmap = slice_heatmap.update_layout(title="缺少 tokenizer，无法捕获激活样本")
         else:
             try:
-                sample = capture_module_output_sample(
-                    self._model, self._tokenizer, module_path,
+                # input activation = what gets quantized in W8A8 (y = W·x);
+                # reuse capture_sample_inputs (one forward, independent hook)
+                cap = capture_sample_inputs(
+                    self._model, self._tokenizer, [module_path],
                     text=_ACT_SAMPLE_TEXT, seq_length=int(seq_length),
                 )
+                sample = cap.get(module_path)
             except Exception:  # noqa: BLE001  forward/shape errors -> placeholder
                 sample = None
             if sample is None:
                 slice_violin = slice_violin.update_layout(
-                    title=f"未捕获到 {module_path} 的激活样本")
+                    title=f"未捕获到 {module_path} 的输入激活样本")
                 slice_heatmap = slice_heatmap.update_layout(
-                    title=f"未捕获到 {module_path} 的激活样本")
+                    title=f"未捕获到 {module_path} 的输入激活样本")
             else:
                 tok_stats = activation_stats_per_token(sample, module_path)
+                # flatten [..., seq, hidden] -> [N, hidden] so each token is a
+                # violin slice; channel_violin slices axis 0, and a 3D
+                # [batch, seq, hidden] would otherwise yield 1 slice (by batch)
+                sample_2d = sample.reshape(-1, sample.shape[-1])
                 slice_violin = channel_violin(
-                    sample, granularity=Granularity.PER_CHANNEL, stats=tok_stats,
-                    name=f"per-token 分布: {module_path}")
+                    sample_2d, granularity=Granularity.PER_CHANNEL, stats=tok_stats,
+                    name=f"per-token 输入分布: {module_path}")
                 slice_heatmap = channel_stats_heatmap(
-                    tok_stats, title=f"per-token 形态: {module_path}")
+                    tok_stats, title=f"per-token 输入形态: {module_path}")
 
         # --- per-token abs_max distribution + outlier magnitude (calibration) ---
-        ts = agg.token_stats.get(module_path, {}).get("output") if agg else None
+        # input role: the activation quantized in W8A8 is the Linear input (x)
+        ts = agg.token_stats.get(module_path, {}).get("input") if agg else None
         if ts is None or ts.count == 0:
             token_fig = go.Figure().update_layout(
                 title="未采集 per-token 统计（勾选「采集 per-token 统计」后重新校准）",
                 template="plotly_white")
             advice = "未采集 per-token 统计（勾选后重新校准）；per-token 切片视图可用"
         else:
-            summ = activation_token_summary(ts, module_path, "output")
+            summ = activation_token_summary(ts, module_path, "input")
             outlier_info = activation_token_outliers(ts)
             token_fig = render_token_absmax_violin(
                 ts, outlier_info=outlier_info,
-                name=f"per-token abs_max: {module_path}")
+                name=f"per-token abs_max (输入): {module_path}")
             parts = [
                 f"形态={summ.shape_label}",
                 f"mean={ts.mean:.3f} std={ts.std:.3f}",
@@ -196,13 +203,13 @@ class App:
             ratio = outlier_info.get("outlier_ratio", float("nan"))
             if sev == sev:
                 parts.append(f"离群比例={ratio:.1%} severity={sev:.2f}")
-            advice = "per-token abs_max | " + " | ".join(parts)
+            advice = "输入 per-token abs_max | " + " | ".join(parts)
 
         # --- global activation histogram (needs collect_histogram) ---
-        h = agg.histograms.get(module_path, {}).get("output") if agg else None
+        h = agg.histograms.get(module_path, {}).get("input") if agg else None
         if h is not None:
             global_fig = render_histogram_result(
-                h.to_result(), name=f"activation: {module_path}")
+                h.to_result(), name=f"输入 activation: {module_path}")
         else:
             global_fig = go.Figure().update_layout(
                 title="未采集全局直方图（勾选「采集直方图」后重新校准）",
@@ -440,7 +447,8 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                           cal_out)
 
             gr.Markdown(
-                "激活分布分析：per-token 切片形态 + per-token abs_max 分布与离群幅度。"
+                "激活分布分析（**输入**激活，即 W8A8 中被量化的 x）："
+                "per-token 切片形态 + per-token abs_max 分布与离群幅度。"
             )
             act_mod = gr.Dropdown([], label="module")
 

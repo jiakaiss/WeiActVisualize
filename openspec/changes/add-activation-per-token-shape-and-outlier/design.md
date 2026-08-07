@@ -22,20 +22,19 @@
 **Non-Goals:**
 - per-channel（hidden 维）激活分析整体移除（`RunningChannelStats` / `activation_outlier_channels` / `channel_absmean_bar` / `collect_channel_stats` / 敏感性与报告的 `act_channel_severity`）：per-channel 激活量化无推理引擎支持，作量化粒度无意义；其唯一价值（离群通道 = SmoothQuant 诊断）不足以维持独立链路。激活分析聚焦 per-token。
 - 激活量化前后对比、`distance.py` 改造、结果落盘缓存。
-- input/output 对齐（当前 `view_activation` 看 output；W8A8 实际量化 input。本变更不改这一点，留作后续）。
 
 ## Decisions
 
 ### D1: per-token 切片视图的数据源 = 按需单 module 样本捕获（非校准期保留）
-- **决策**：用户点「查看激活分布」时，对选中 module 跑一次前向、hook 捕获其 output 激活，计算 per-token 形态指标后释放原始张量。
+- **决策**：用户点「查看激活分布」时，对选中 module 跑一次前向、hook 捕获其**输入**激活，计算 per-token 形态指标后释放原始张量。
 - **备选 A**：校准期为所有 module 保留 per-token hidden 向量 -- 否决，破坏 O(1) 内存（7B × hidden × tokens 不可接受）。
 - **备选 B**：校准期保留 top-k token 向量 -- 否决，"哪些 k" 依赖完整分布且增加 aggregator 复杂度。
 - **理由**：复用 `capture_sample_inputs` 范式，有界内存（单条样本 × 有界 seq_length），仅对查看的 module 触发，不污染校准 aggregator。
 
-### D2: 按需样本捕获 = output 激活，单条样本 + 有界 seq_length
-- **决策**：新增 `capture_module_output_sample(model, tokenizer, module_path, text, seq_length=512)`，返回该 module 的 output 激活张量。单条文本、seq_length 上界 512（≈512 token，足够 top-64 violin 采样），内存 ≈ 512 × hidden × 2B（7B 下约 4MB）。
-- **理由**：与 `view_activation` 现有 output 语义一致；有界；top-k violin 只需数十 token。
-- **取舍**：W8A8 量化的是 input，此处看 output（见 Non-Goals / Open Questions）。
+### D2: 按需样本捕获 = **输入**激活，复用 `capture_sample_inputs`
+- **决策**：复用既有 `capture_sample_inputs(model, tokenizer, [module_path], text, seq_length)` 捕获该 module 的**输入**激活张量（W8A8 量化的是 Linear 输入 x，不是输出）。单条文本、seq_length 上界 512（≈512 token，足够 top-64 violin 采样），内存 ≈ 512 × hidden × 2B（7B 下约 4MB）。
+- **理由**：输入才是被量化的激活；输出是加权和（CLT 趋向高斯、尾部轻），其重尾不代表量化难度。`capture_sample_inputs` 已存在且被敏感性分析使用，复用避免新增函数。校准聚合器本就同时采集 input/output，决策视图取 input role 即可。
+- **展平**：捕获的激活是 `[batch, seq, hidden]`，传给 `channel_violin` 前先 `reshape(-1, hidden)` 成 `[N, hidden]`，否则 `slice_weight` 按轴 0（batch=1）切片只得 1 个切片而非 per-token。
 
 ### D3: per-token 切片形态指标 = 扩展 `activation_stats_per_token`
 - **决策**：在 `activation_stats_per_token` (`activation_stats.py:20`) 中，对每个 token 的 hidden 行调用 `shape.excess_kurtosis` / `skewness` / `robust_tail_ratio` / `shape_label`，填入 `StatResult` 的 kurtosis/skewness/tail_ratio/shape_label 字段。
@@ -80,10 +79,10 @@
 
 ## Migration Plan
 
-纯增量。新增 `capture_module_output_sample`、`activation_token_outliers`、扩展 `activation_stats_per_token`、`view_activation` 返回结构与 gradio outputs。校准流程与在线聚合不变。回滚 = revert 本 change，无数据 / 配置格式变更。
+复用 `capture_sample_inputs`（既有）+ 新增 `activation_token_outliers`、扩展 `activation_stats_per_token`、`view_activation` 改取 input role + 3D 展平 + 返回结构/gradio outputs 调整。校准流程与在线聚合不变（input/output 仍都采集）。回滚 = revert 本 change，无数据 / 配置格式变更。
 
 ## Open Questions
 
-- **按需样本捕获 input 还是 output？** 当前选 output（与 `view_activation` 一致）。W8A8 量化 input，若后续要对齐，可加 role 参数。本变更不处理。
 - **按需样本是否按 module 缓存？** 第一版不缓存（每次重算一次前向，简单）。若实测卡顿，按 `(module_path, sample_text)` 缓存。
 - **per-token abs_max violin 是否保留原柱状图？** 第一版替换为 violin（global 激活直方图仍是柱状）。若需并列可后续加。
+- **是否提供 input/output 切换？** 当前固定 input（量化相关）。若需看 output 可后续加 role 切换。

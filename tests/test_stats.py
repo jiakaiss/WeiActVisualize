@@ -352,6 +352,19 @@ def test_channel_violin_and_heatmap_accept_per_token_stats():
     assert isinstance(hm, go.Figure)
 
 
+def test_per_token_slice_flattens_3d_activation():
+    """A 3D [batch, seq, hidden] activation must flatten to [N, hidden] so each
+    token is a violin slice -- not 1 slice sliced by the batch axis."""
+    rng = np.random.RandomState(0)
+    a = torch.tensor(rng.randn(2, 5, 16))  # [batch=2, seq=5, hidden=16]
+    tok = activation_stats_per_token(a, "m")
+    assert len(tok) == 2 * 5  # 10 tokens
+    flat = a.reshape(-1, a.shape[-1])  # [10, 16] -- what view_activation passes
+    fig = channel_violin(flat, granularity=Granularity.PER_CHANNEL,
+                         stats=tok, max_channels=64)
+    assert len(fig.data) == 10  # one violin per token, not 1
+
+
 def test_render_token_absmax_violin_without_histogram():
     """No abs_max_hist (single-pass) -> placeholder figure, no exception."""
     from weiacviz.loading.runner import RunningTokenStats
