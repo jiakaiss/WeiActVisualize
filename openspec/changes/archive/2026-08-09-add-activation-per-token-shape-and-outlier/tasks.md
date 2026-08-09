@@ -28,7 +28,7 @@
 
 - [x] 5.1 集成测试 `tests/test_integration.py`：加载 Qwen2-0.5B -> `view_activation` 返回全部图；未校准时切片视图可用、abs_max violin 占位；校准后 abs_max violin + 离群标记可用
 - [x] 5.2 `pytest` 全量通过
-- [ ] 5.3 手动启动 Gradio（Qwen2-0.5B, CPU）确认 per-token 切片 violin / 形态热力图 / abs_max violin 离群标记正常渲染
+- [x] 5.3 手动启动 Gradio（Qwen2-0.5B, CPU）确认 per-token 切片 violin / 形态热力图 / abs_max violin 离群标记正常渲染（用户已手动验证：发现并修复了切片只显示 1 个的 bug，确认多切片渲染）
 
 ## 6. 移除 per-channel（hidden 维）激活分析
 
