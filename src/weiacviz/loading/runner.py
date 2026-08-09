@@ -221,72 +221,15 @@ class RunningTokenStats:
         }
 
 
-class RunningChannelStats:
-    """Online per-channel (hidden-dim) activation magnitude aggregation.
-
-    For an activation ``[..., seq, hidden]``, reshapes to ``[N, hidden]`` and
-    accumulates per-channel ``abs_sum`` and ``abs_max`` along the token axis,
-    so each hidden channel gets an ``abs_mean`` (= abs_sum/count) and
-    ``abs_max``. Memory is O(hidden), independent of batch count.
-
-    This surfaces outlier channels (a few hidden channels with abnormally
-    large abs_mean) -- the SmoothQuant motivation. Default OFF: per-channel
-    activation quantization has limited inference-engine support, so this is
-    a SmoothQuant-suitability diagnostic, not the main activation analysis.
-    """
-
-    def __init__(self):
-        self.abs_sum = None  # np.ndarray [hidden], lazy alloc on first update
-        self.abs_max = None  # np.ndarray [hidden]
-        self.count = 0  # token count (same for all channels)
-        self.hidden = None
-
-    def update(self, t) -> None:
-        a = to_numpy(t)
-        if a.ndim < 2:
-            a = a.reshape(1, -1)
-        flat = a.reshape(-1, a.shape[-1])  # [N, hidden]
-        n, h = flat.shape
-        if n == 0:
-            return
-        absv = np.abs(flat).astype(np.float64)
-        if self.abs_sum is None:
-            self.abs_sum = np.zeros(h, dtype=np.float64)
-            self.abs_max = np.zeros(h, dtype=np.float64)
-            self.hidden = h
-        if h != self.hidden:
-            return  # shape mismatch across batches for this module; skip
-        self.abs_sum += absv.sum(axis=0)
-        self.abs_max = np.maximum(self.abs_max, absv.max(axis=0))
-        self.count += n
-
-    @property
-    def abs_mean(self):
-        return (self.abs_sum / self.count) if (self.abs_sum is not None and self.count) else None
-
-    def to_result(self):
-        if self.abs_sum is None:
-            return None
-        am = self.abs_mean
-        return {
-            "hidden": self.hidden,
-            "count": self.count,
-            "abs_mean": am.tolist() if am is not None else [],
-            "abs_max": self.abs_max.tolist(),
-        }
-
-
 class OnlineAggregator:
     """Per-module per-role running stats, updated batch by batch.
 
     Optionally also tracks per-token activation magnitudes (``token_stats``)
-    for the per-token activation quantization decision (block A), and/or
-    per-channel (hidden-dim) abs_mean (``channel_stats``) as a SmoothQuant
-    outlier-channel diagnostic (default off).
+    for the per-token activation quantization decision.
     """
 
     def __init__(self, module_paths: List[str], collect_token_stats: bool = False,
-                 token_bins: int = 256, collect_channel_stats: bool = False):
+                 token_bins: int = 256):
         self.paths = module_paths
         self.stats: Dict[str, Dict[str, RunningStats]] = {
             p: {"input": RunningStats(), "output": RunningStats()} for p in module_paths
@@ -305,16 +248,6 @@ class OnlineAggregator:
                     "input": RunningTokenStats(num_bins=token_bins),
                     "output": RunningTokenStats(num_bins=token_bins),
                 }
-        self.collect_channel_stats = collect_channel_stats
-        self.channel_stats: Dict[str, Dict[str, Optional[RunningChannelStats]]] = {
-            p: {"input": None, "output": None} for p in module_paths
-        }
-        if collect_channel_stats:
-            for p in module_paths:
-                self.channel_stats[p] = {
-                    "input": RunningChannelStats(),
-                    "output": RunningChannelStats(),
-                }
 
     def update_from_capture(self, capture: ActivationCapture,
                             update_stats: bool = True,
@@ -324,13 +257,10 @@ class OnlineAggregator:
                 continue
             for role, tensor in entry.items():
                 ts = self.token_stats[path][role]
-                cs = self.channel_stats[path][role]
                 if update_stats:
                     self.stats[path][role].update(tensor)
                     if ts is not None:
                         ts.update_moments(tensor)
-                    if cs is not None:
-                        cs.update(tensor)
                 if update_histogram:
                     h = self.histograms[path][role]
                     if h is not None:
@@ -369,8 +299,6 @@ class OnlineAggregator:
                     }
                 ts = self.token_stats[p][r]
                 entry["token_stats"] = ts.to_result() if ts is not None else None
-                cs = self.channel_stats[p][r]
-                entry["channel_stats"] = cs.to_result() if cs is not None else None
                 out[p][r] = entry
         return out
 
@@ -411,7 +339,6 @@ def run_calibration(
     collect_histogram: bool = False,
     num_bins: int = 256,
     collect_token_stats: bool = True,
-    collect_channel_stats: bool = False,
 ) -> OnlineAggregator:
     """Run batched calibration inference, aggregating activation stats online.
 
@@ -429,16 +356,12 @@ def run_calibration(
     are aggregated in Pass 1 (O(1) memory) for the per-token activation
     quantization decision; if ``collect_histogram`` is also True the per-token
     abs_max histogram is filled in Pass 2 for visualization.
-
-    When ``collect_channel_stats`` is True, per-channel (hidden-dim) abs_mean
-    is aggregated (O(hidden) memory) as a SmoothQuant outlier-channel
-    diagnostic.
     """
     cfg = config or CaptureConfig(max_samples=len(texts))
     texts = texts[: cfg.max_samples]
     aggregator = OnlineAggregator(
         module_paths, collect_token_stats=collect_token_stats,
-        token_bins=num_bins, collect_channel_stats=collect_channel_stats,
+        token_bins=num_bins,
     )
     capture = ActivationCapture(module_paths, cfg.capture_inputs, cfg.capture_outputs)
     capture.attach(model)

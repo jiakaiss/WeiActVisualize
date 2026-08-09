@@ -146,7 +146,7 @@ def test_app_build_report_and_export():
     df, summary = app.build_report(bits=4, seq_length=8)
     assert len(df) == len(app._modules)
     assert {"module", "kind", "bits", "granularity", "symmetry",
-            "joint_output_mse", "act_severity", "reason"} <= set(df.columns)
+            "joint_output_mse", "reason"} <= set(df.columns)
     assert "modules analyzed" in summary
 
     md_path = app.export_report("markdown")
@@ -156,14 +156,15 @@ def test_app_build_report_and_export():
 
 
 def test_app_view_activation_per_token():
-    """App.view_activation returns per-token advice + global/per-token/
-    per-channel figures after a two-pass calibration with token stats."""
+    """App.view_activation returns advice + global / abs-max violin / slice
+    violin / slice heatmap after a two-pass calibration with token stats."""
     from weiacviz.shared.types import CaptureConfig
     from weiacviz.viz.app import App
 
     model = TinyModel()
     app = App()
     app._model = model
+    app._tokenizer = DummyTok()
     app._resolve_result = resolve_modules(model)
     app._modules = app._resolve_result.modules
     paths = [m.path for m in app._modules]
@@ -174,13 +175,38 @@ def test_app_view_activation_per_token():
         config=CaptureConfig(max_samples=8, batch_size=4), seq_length=8,
         collect_histogram=True, num_bins=32, collect_token_stats=True,
     )
-    advice, global_fig, token_fig, channel_fig = app.view_activation(paths[0])
+    advice, global_fig, token_fig, slice_vio, slice_hm = \
+        app.view_activation(paths[0], seq_length=8)
     assert "per-token abs_max" in advice
-    assert "per-token abs_max" in token_fig.layout.title.text
-    # global histogram collected -> non-empty
+    assert "per-token abs_max" in token_fig.layout.title.text  # abs_max violin
     assert "activation" in global_fig.layout.title.text
-    # channel stats not collected -> placeholder title
-    assert "per-channel abs_mean" not in channel_fig.layout.title.text
+    # per-token slice view rendered from on-demand sample
+    assert "未捕获到" not in (slice_vio.layout.title.text or "")
+    assert len(slice_vio.data) >= 1
+    assert slice_hm is not None
+
+
+def test_app_view_activation_slice_view_without_calibration():
+    """Per-token slice view renders from an on-demand sample even before any
+    calibration; calibration-dependent views show placeholders."""
+    from weiacviz.viz.app import App
+
+    model = TinyModel()
+    app = App()
+    app._model = model
+    app._tokenizer = DummyTok()
+    app._resolve_result = resolve_modules(model)
+    app._modules = app._resolve_result.modules
+    paths = [m.path for m in app._modules]
+    # no calibration run -> aggregator is None
+    advice, global_fig, token_fig, slice_vio, slice_hm = \
+        app.view_activation(paths[0], seq_length=8)
+    assert "未采集" in advice
+    assert "未采集" in (token_fig.layout.title.text or "")
+    assert "未采集" in (global_fig.layout.title.text or "")
+    # slice view still rendered from on-demand sample
+    assert "未捕获到" not in (slice_vio.layout.title.text or "")
+    assert len(slice_vio.data) >= 1
 
 
 def test_capture_sample_inputs_returns_one_per_module():
@@ -216,8 +242,8 @@ def test_layer_sensitivity_output_ranks_and_has_joint():
 
 
 def test_app_run_sensitivity_returns_table_and_heatmap():
-    """App.run_sensitivity returns a whole-model table (with weight_mse,
-    output_mse, weight_kurtosis, act_cv) and a heatmap."""
+    """App.run_sensitivity returns a whole-model table (output_mse,
+    joint_output_mse, weight_kurtosis_max, heavy_channel_ratio) and a heatmap."""
     from weiacviz.viz.app import App
 
     model = TinyModel()
@@ -230,7 +256,7 @@ def test_app_run_sensitivity_returns_table_and_heatmap():
     df, hm = app.run_sensitivity(bits=4, sort_by="joint_output_mse", seq_length=8)
     assert len(df) == len(app._modules)
     expected = {"module_path", "kind", "output_mse", "joint_output_mse",
-                "weight_kurtosis_max", "heavy_channel_ratio", "act_channel_severity"}
+                "weight_kurtosis_max", "heavy_channel_ratio"}
     assert expected <= set(df.columns)
     assert hm is not None
 

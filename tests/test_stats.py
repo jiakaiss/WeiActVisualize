@@ -69,6 +69,64 @@ def test_activation_token_summary():
     assert s.shape_label  # non-empty
 
 
+def test_activation_stats_per_token_has_shape_metrics():
+    """Per-token stats carry kurtosis/skewness/tail_ratio/shape_label; a
+    heavy-tailed token (laplace) is flagged vs a normal one."""
+    rng = np.random.RandomState(0)
+    a = np.stack([rng.randn(4000), rng.laplace(0, 1, 4000)])  # [2, hidden]
+    tok = activation_stats_per_token(torch.tensor(a), "m")
+    assert len(tok) == 2
+    assert tok[1].kurtosis > tok[0].kurtosis  # laplace heavier than normal
+    assert tok[1].shape_label == "重尾"
+    assert tok[0].shape_label  # non-empty
+    assert tok[0].tail_ratio == tok[0].tail_ratio  # not NaN
+
+
+def test_activation_stats_per_token_zero_variance_robust():
+    """Constant tokens (zero variance) yield NaN shape metrics, no exception."""
+    a = torch.ones(2, 5)
+    tok = activation_stats_per_token(a, "m")
+    assert len(tok) == 2
+    for s in tok:
+        assert math.isnan(s.kurtosis)
+        assert math.isnan(s.tail_ratio)
+        assert s.shape_label  # '未知' label, non-empty
+
+
+def test_activation_token_outliers_severity_and_ratio():
+    """activation_token_outliers reports max_abs, severity (max/median) and
+    outlier_ratio from the per-token abs_max histogram."""
+    from weiacviz.loading.runner import RunningTokenStats
+    from weiacviz.stats.activation_stats import activation_token_outliers
+    ts = RunningTokenStats(num_bins=32)
+    base = torch.ones(20, 8) * 0.5    # 20 tokens, abs_max = 0.5
+    spike = torch.ones(2, 8) * 5.0    # 2 tokens, abs_max = 5.0
+    ts.update_moments(base)
+    ts.update_moments(spike)
+    ts.build_histogram()
+    ts.update_histogram(base)
+    ts.update_histogram(spike)
+    info = activation_token_outliers(ts, method="percentile", percentile=99)
+    assert info["max_abs"] == 5.0
+    assert info["severity"] > 1.0      # 5.0 / 0.5 = 10
+    assert 0.0 < info["outlier_ratio"] <= 0.2
+
+
+def test_activation_token_outliers_without_histogram_degrades():
+    """Without the two-pass histogram, max_abs + zscore threshold still come
+    from online moments; ratio/severity are NaN."""
+    from weiacviz.loading.runner import RunningTokenStats
+    from weiacviz.stats.activation_stats import activation_token_outliers
+    ts = RunningTokenStats(num_bins=32)
+    ts.update_moments(torch.randn(10, 8))
+    assert ts.abs_max_hist is None
+    info = activation_token_outliers(ts, method="zscore", k=3.0)
+    assert info["max_abs"] == info["max_abs"]          # available
+    assert info["threshold"] == info["threshold"]      # mean + k*std
+    assert math.isnan(info["outlier_ratio"])           # needs histogram
+    assert math.isnan(info["severity"])                # needs median
+
+
 def test_outliers_percentile():
     a = np.array([0.0] * 100 + [100.0])
     res = detect_outliers_percentile(a, percentile=99.0)
@@ -276,3 +334,61 @@ def test_channel_violin_fallback_label_without_stats():
     # no stats -> "#<index>" labels without kurtosis
     assert all(t.name.startswith("#") for t in fig.data)
     assert all("k=" not in t.name for t in fig.data)
+
+
+# --- per-token activation slice + abs_max violin ---
+
+def test_channel_violin_and_heatmap_accept_per_token_stats():
+    """The weight-side violin + heatmap render per-token StatResults unchanged
+    (each token is a slice, axis 0)."""
+    rng = np.random.RandomState(0)
+    a = torch.tensor(np.stack([rng.randn(200) for _ in range(10)]))  # [10, 200]
+    tok = activation_stats_per_token(a, "m")
+    vio = channel_violin(a, granularity=Granularity.PER_CHANNEL,
+                         stats=tok, max_channels=64)
+    hm = channel_stats_heatmap(tok, title="per-token")
+    assert isinstance(vio, go.Figure)
+    assert len(vio.data) == 10  # one violin per token
+    assert isinstance(hm, go.Figure)
+
+
+def test_per_token_slice_flattens_3d_activation():
+    """A 3D [batch, seq, hidden] activation must flatten to [N, hidden] so each
+    token is a violin slice -- not 1 slice sliced by the batch axis."""
+    rng = np.random.RandomState(0)
+    a = torch.tensor(rng.randn(2, 5, 16))  # [batch=2, seq=5, hidden=16]
+    tok = activation_stats_per_token(a, "m")
+    assert len(tok) == 2 * 5  # 10 tokens
+    flat = a.reshape(-1, a.shape[-1])  # [10, 16] -- what view_activation passes
+    fig = channel_violin(flat, granularity=Granularity.PER_CHANNEL,
+                         stats=tok, max_channels=64)
+    assert len(fig.data) == 10  # one violin per token, not 1
+
+
+def test_render_token_absmax_violin_without_histogram():
+    """No abs_max_hist (single-pass) -> placeholder figure, no exception."""
+    from weiacviz.loading.runner import RunningTokenStats
+    from weiacviz.viz.charts import render_token_absmax_violin
+    ts = RunningTokenStats(num_bins=16)
+    ts.update_moments(torch.randn(4, 8))
+    assert ts.abs_max_hist is None
+    fig = render_token_absmax_violin(ts)
+    assert isinstance(fig, go.Figure)
+    assert "未采集" in fig.layout.title.text
+
+
+def test_render_token_absmax_violin_with_histogram_and_outliers():
+    """With the two-pass histogram, the violin renders and outlier lines are
+    added when outlier_info is provided."""
+    from weiacviz.loading.runner import RunningTokenStats
+    from weiacviz.viz.charts import render_token_absmax_violin
+    from weiacviz.stats.activation_stats import activation_token_outliers
+    ts = RunningTokenStats(num_bins=16)
+    a = torch.randn(40, 8)
+    ts.update_moments(a)
+    ts.build_histogram()
+    ts.update_histogram(a)
+    info = activation_token_outliers(ts)
+    fig = render_token_absmax_violin(ts, outlier_info=info)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) >= 1  # violin trace present

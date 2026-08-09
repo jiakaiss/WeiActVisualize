@@ -42,28 +42,57 @@ def render_histogram_result(h: HistogramResult, name: str = "values") -> go.Figu
     return fig
 
 
-def channel_absmean_bar(channel_stats, name: str = "per-channel abs_mean",
-                        k: float = 5.0) -> go.Figure:
-    """Bar chart of per-channel (hidden-dim) abs_mean; outlier channels red.
+def render_token_absmax_violin(token_stats, outlier_info=None,
+                               name: str = "per-token abs_max",
+                               max_points: int = 4000) -> go.Figure:
+    """Render the per-token abs_max distribution as a violin (KDE + IQR +
+    median), reconstructed from the online histogram by weighted sampling of
+    bin centers. Outlier threshold / max are marked with horizontal lines.
 
-    Surfaces the SmoothQuant motivation: a few channels with abnormally large
-    abs_mean that dominate the activation range. ``channel_stats`` is a
-    RunningChannelStats (duck-typed: ``to_result()`` -> dict with abs_mean).
+    The per-token abs_max distribution is only available as (counts, bin_edges)
+    from ``RunningTokenStats`` (online, O(1)); raw per-token scalars are not
+    retained. Sampling bin centers weighted by counts faithfully reconstructs
+    the KDE for visualization; exact shape metrics come from the online raw
+    moments and are displayed separately (e.g. in the advice text).
     """
-    res = channel_stats.to_result() if hasattr(channel_stats, "to_result") else channel_stats
-    am = np.asarray(res.get("abs_mean", []), dtype=np.float64)
-    if am.size == 0:
+    hist = getattr(token_stats, "abs_max_hist", None)
+    if hist is None:
+        fig = go.Figure()
+        fig.update_layout(
+            title=f"{name}（未采集 per-token 直方图，勾选「采集直方图」后重新校准）",
+            template="plotly_white")
+        return fig
+    hr = hist.to_result()
+    counts = np.asarray(hr.counts, dtype=np.float64)
+    edges = np.asarray(hr.bin_edges, dtype=np.float64)
+    total = float(counts.sum())
+    if total == 0:
         fig = go.Figure()
         fig.update_layout(title=f"{name} (no data)", template="plotly_white")
         return fig
-    med = float(np.median(am))
-    colors = ["crimson" if (med > 0 and v > k * med) else "steelblue" for v in am]
-    fig = go.Figure(data=go.Bar(y=am, marker_color=colors, name=name))
-    n_out = sum(1 for c in colors if c == "crimson")
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    probs = counts / counts.sum()
+    probs = probs / probs.sum()  # guard float drift for rng.choice
+    n = min(max_points, int(total))
+    rng = np.random.default_rng(0)
+    sample = rng.choice(centers, size=n, p=probs)
+    fig = go.Figure()
+    fig.add_trace(go.Violin(
+        y=sample, name=name, points=False, box_visible=True,
+        meanline_visible=True, showlegend=False,
+    ))
+    if outlier_info is not None:
+        thr = float(outlier_info.get("threshold", float("nan")))
+        max_abs = float(outlier_info.get("max_abs", float("nan")))
+        if thr == thr:
+            fig.add_hline(y=thr, line=dict(color="orange", dash="dash"),
+                          annotation_text=f"阈值 {thr:.3g}")
+        if max_abs == max_abs:
+            fig.add_hline(y=max_abs, line=dict(color="crimson", dash="dot"),
+                          annotation_text=f"max {max_abs:.3g}")
     fig.update_layout(
-        title=f"{name} (median={med:.3g}, {n_out} outlier channel{'s' if n_out != 1 else ''} > {k}x)",
-        xaxis_title="channel index", yaxis_title="abs_mean",
-        template="plotly_white",
+        title=f"{name} 分布 (violin)", template="plotly_white",
+        xaxis_visible=False, yaxis_title="per-token abs_max",
     )
     return fig
 
@@ -86,8 +115,7 @@ def layer_stats_heatmap(matrix: List[List[float]], title: str = "per-layer stats
 def sensitivity_heatmap(
     rows: List[dict],
     metrics: Sequence[str] = ("output_mse", "joint_output_mse",
-                              "weight_kurtosis_max", "heavy_channel_ratio",
-                              "act_channel_severity"),
+                              "weight_kurtosis_max", "heavy_channel_ratio"),
     title: str = "per-module sensitivity (each metric normalized)",
 ) -> go.Figure:
     """Normalized [metric x module] heatmap from sensitivity rows.

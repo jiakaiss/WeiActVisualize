@@ -18,28 +18,26 @@ def _fake_report():
             recommended_granularity="per-channel", recommended_symmetry="symmetric",
             output_mse=1e-5, joint_output_mse=1e-5,
             weight_kurtosis_max=0.0, heavy_channel_ratio=0.0,
-            act_channel_severity=float("nan"),
             reason="why: low | how: W4 per-channel symmetric | 激活 per-token"),
         ModuleRecommendation(
             module_path="b", kind="mlp", recommended_bits=8,
             recommended_granularity="per-group(128)", recommended_symmetry="asymmetric",
             output_mse=1e-2, joint_output_mse=1e-2,
             weight_kurtosis_max=50.0, heavy_channel_ratio=0.1,
-            act_channel_severity=10.0,
             reason="why: high | how: W8 per-group(128) asymmetric | 激活 per-token"),
     ]
     return RecommendationReport(model="test", config={"bits": 4},
                                 recommendations=recs, summary="2 modules.")
 
 
-def _row(path, kind, out_mse, skew=0.0, sev=float("nan"), joint=None,
+def _row(path, kind, out_mse, skew=0.0, joint=None,
          heavy_ratio=0.0, kurt_max=0.0):
     """Build a sensitivity row. ``joint`` defaults to ``out_mse`` (so weight-only
     and W8A8 are equal unless activation loss is being tested)."""
     return {"module_path": path, "kind": kind, "output_mse": out_mse,
             "joint_output_mse": out_mse if joint is None else joint,
             "weight_kurtosis_max": kurt_max, "heavy_channel_ratio": heavy_ratio,
-            "weight_skewness": skew, "act_channel_severity": sev}
+            "weight_skewness": skew}
 
 
 def test_recommend_low_vs_high_sensitivity():
@@ -58,13 +56,6 @@ def test_recommend_low_vs_high_sensitivity():
 def test_recommend_skew_asymmetric():
     rep = recommend([_row("a", "attn", 1e-6, skew=0.8)], model_name="m")
     assert rep.recommendations[0].recommended_symmetry == "asymmetric"
-
-
-def test_recommend_act_outliers_in_reason():
-    # notable activation outliers appear in reason as a diagnostic (not an algo pick)
-    rep = recommend([_row("a", "attn", 1e-6, sev=8.0)], model_name="m")
-    assert "激活离群通道" in rep.recommendations[0].reason
-    assert not hasattr(rep.recommendations[0], "needs_smoothquant")  # removed
 
 
 def test_recommend_down_proj_high_sens_w8_per_channel():
