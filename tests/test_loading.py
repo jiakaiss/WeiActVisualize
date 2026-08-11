@@ -3,6 +3,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from weiacviz.loading.adapter import HFCausalLMAdapter
 from weiacviz.loading.module_resolver import resolve_modules, detect_arch_family
 from weiacviz.loading.weights import get_weight, slice_weight
 from weiacviz.loading.hook import ActivationCapture
@@ -126,8 +127,8 @@ def test_online_aggregator_memory_independent_of_batches():
             return {"input_ids": torch.randn(n, max_length)}
 
     texts = ["a b c"] * 20
-    agg = run_calibration(model, DummyTok(), texts, paths,
-                          config=None, seq_length=8)
+    agg = run_calibration(HFCausalLMAdapter(model, DummyTok(), texts, seq_length=8), paths,
+                          config=None)
     # every target module should have non-zero activation counts
     for p in paths:
         assert agg.stats[p]["output"].count > 0
@@ -158,8 +159,8 @@ def test_two_pass_calibration_collects_histogram():
             return {"input_ids": torch.ones(n, max_length)}
 
     texts = ["a b c"] * 20
-    agg = run_calibration(model, DummyTok(), texts, paths,
-                          config=None, seq_length=8,
+    agg = run_calibration(HFCausalLMAdapter(model, DummyTok(), texts, seq_length=8), paths,
+                          config=None,
                           collect_histogram=True, num_bins=32)
     for p in paths:
         s = agg.stats[p]["output"]
@@ -183,8 +184,8 @@ def test_calibration_without_histogram_leaves_histograms_none():
             return {"input_ids": torch.ones(n, max_length)}
 
     texts = ["a b c"] * 8
-    agg = run_calibration(model, DummyTok(), texts, paths,
-                          config=None, seq_length=8, collect_histogram=False)
+    agg = run_calibration(HFCausalLMAdapter(model, DummyTok(), texts, seq_length=8), paths,
+                          config=None, collect_histogram=False)
     for p in paths:
         assert agg.histograms[p]["output"] is None
         assert agg.stats[p]["output"].count > 0
@@ -232,8 +233,8 @@ def test_two_pass_calibration_collects_token_histogram():
             return {"input_ids": torch.arange(n * max_length).reshape(n, max_length).float()}
 
     texts = ["a b c"] * 12
-    agg = run_calibration(model, DummyTok(), texts, paths, config=None,
-                          seq_length=8, collect_histogram=True, num_bins=32,
+    agg = run_calibration(HFCausalLMAdapter(model, DummyTok(), texts, seq_length=8), paths, config=None,
+                          collect_histogram=True, num_bins=32,
                           collect_token_stats=True)
     for p in paths:
         ts = agg.token_stats[p]["output"]
@@ -256,8 +257,8 @@ def test_single_pass_calibration_token_stats_without_histogram():
             return {"input_ids": torch.arange(n * max_length).reshape(n, max_length).float()}
 
     texts = ["a b c"] * 8
-    agg = run_calibration(model, DummyTok(), texts, paths, config=None,
-                          seq_length=8, collect_histogram=False,
+    agg = run_calibration(HFCausalLMAdapter(model, DummyTok(), texts, seq_length=8), paths, config=None,
+                          collect_histogram=False,
                           collect_token_stats=True)
     for p in paths:
         ts = agg.token_stats[p]["output"]

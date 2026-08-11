@@ -46,7 +46,7 @@ def layer_sensitivity_output(
         up the per-token scale (SmoothQuant territory).
 
     ``sample_inputs`` maps module path -> one input activation (from
-    ``capture_sample_inputs``). Modules without a sample input get NaN and
+    ``ModelAdapter.sample_inputs``). Modules without a sample input get NaN and
     sort last. Sorted by ``joint_output_mse`` descending.
     """
     kinds = kinds or {}

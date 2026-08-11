@@ -7,7 +7,7 @@ from typing import List
 from ..loading.module_resolver import ResolveResult
 from ..shared.types import ModuleKind
 
-_LAYER_RE = re.compile(r"layers\.(\d+)\.")
+_LAYER_RE = re.compile(r"(?:layers|blocks)\.(\d+)\.")
 
 _KIND_ORDER = {
     ModuleKind.ATTENTION: 0,

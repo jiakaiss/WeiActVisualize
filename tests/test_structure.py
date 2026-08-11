@@ -59,6 +59,13 @@ def test_layer_index_parsing():
     assert _layer_index("model.embed_tokens") == -1
 
 
+def test_layer_index_parsing_blocks_naming():
+    """DiT-style `blocks.N.` naming is also parsed (not just `layers.N.`)."""
+    assert _layer_index("model.blocks.0.attn_qkv") == 0
+    assert _layer_index("blocks.7.mlp_fc2") == 7
+    assert _layer_index("model.layers.2.x") == 2  # still works
+
+
 def test_module_table_params_and_sort():
     model = TinyModel(n=3)
     result = resolve_modules(model)

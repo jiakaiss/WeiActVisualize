@@ -7,6 +7,8 @@ from typing import Tuple
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from .adapter import HFCausalLMAdapter
+
 # Default to a HuggingFace mirror when HF_ENDPOINT is unset (helps regions where
 # huggingface.co is unreachable). Override via the HF_ENDPOINT env var.
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -114,3 +116,22 @@ def load_model(
 
     model.eval()
     return model, tokenizer
+
+
+def load_causal_lm_adapter(
+    model_name_or_path: str,
+    dtype: str = "fp16",
+    device: str = "auto",
+    trust_remote_code: bool = False,
+    seq_length: int = 2048,
+) -> HFCausalLMAdapter:
+    """Load a causal LM via ``load_model`` and wrap it in an ``HFCausalLMAdapter``.
+
+    Calibration texts are set later (``set_texts``) at calibration time, so
+    ``sample_inputs`` (per-token slice view) works immediately after load.
+    """
+    model, tokenizer = load_model(
+        model_name_or_path, dtype=dtype, device=device,
+        trust_remote_code=trust_remote_code,
+    )
+    return HFCausalLMAdapter(model, tokenizer, seq_length=seq_length)
