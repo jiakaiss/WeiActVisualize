@@ -4,7 +4,7 @@
 
 ## 功能
 
-- **模型加载与张量捕获**：多架构（Llama / Qwen / Mistral / DeepSeek），`device_map=auto` 分块加载支持大模型，forward hook 非侵入式捕获激活
+- **模型加载与张量捕获**：内置 HF causal LM（Llama/Qwen/Mistral/DeepSeek）与 DiT；通过 `ModelAdapter` 接口可接入任意 `nn.Linear` 模型，`device_map=auto` 分块加载支持大模型，forward hook 非侵入式捕获激活
 - **在线聚合**：激活逐批聚合为 running statistics，不保留原始张量，内存与模型规模解耦
 - **分布统计**：权重/激活 per-tensor/channel/group 统计、直方图、离群值检测（百分位 / Z-score）、分布距离（KL / Wasserstein）
 - **量化模拟**：fake quantization（W4/W8、per-tensor/channel/group、对称/非对称），MSE / cosine 误差度量，层级敏感性分析
@@ -47,6 +47,29 @@ python -m weiacviz.viz.app
 | `WEIACVIZ_DEFAULT_OUTLIER_PERCENTILE` | `99.9` | 离群值百分位阈值 |
 | `WEIACVIZ_DEFAULT_OUTLIER_ZSCORE` | `3.0` | 离群值 Z-score 阈值 |
 
+## 自定义模型接入
+
+量化主线针对 `nn.Linear` 层。内置 adapter：
+
+- `HFCausalLMAdapter`：HF causal LM（默认），tokenize 文本 -> `model(input_ids)`
+- `DiTAdapter`：Diffusion Transformer，随机 latent+timestep -> `model(x, t, y)`
+
+接入其他模型（vision / 多模态 / 自定义 `nn.Module`），子类化 `ModelAdapter` override 两个方法即可，Linear 主线自动复用：
+
+```python
+from weiacviz.loading.adapter import ModelAdapter
+
+class MyAdapter(ModelAdapter):
+    def calib_batches(self, n_samples, batch_size):
+        for ...:
+            yield batch  # 确定性：相同参数产出相同序列（两遍校准依赖）
+
+    def run_forward(self, batch):
+        self._model(batch["x"], batch["t"], ...)  # 你的 forward 签名
+```
+
+UI 模型加载 tab 选「DiT 演示」可在界面跑通 DiT 全流程；真实 DiT 用 Python API（`DiTAdapter`）。详见 `src/weiacviz/loading/adapters/README.md`。限制：`output_diff` 敏感性要求目标层可独立前向（纯 Linear 成立）；非 Linear 层降级，权重/激活/fake quant 仍可用。
+
 ## 典型工作流
 
 1. **加载模型**：CPU 验证用小模型（Qwen2-0.5B），大模型选 `device=auto`
@@ -79,4 +102,5 @@ WEIACVIZ_SMOKE_MODEL=<model_id> pytest tests/test_smoke_large.py
 ## 状态
 
 第一版（add-quant-analysis-core）覆盖：分布可视化 + 量化模拟 + 敏感性分析 + Gradio 界面 + 报告导出。
+自定义模型接入（`ModelAdapter` 抽象，内置 DiT 适配）已支持：任意 `nn.Linear` 模型实现两个方法即可接入。
 后续迭代可加：SmoothQuant 离群值迁移、完整量化算法、多卡并行、HF Spaces 部署。

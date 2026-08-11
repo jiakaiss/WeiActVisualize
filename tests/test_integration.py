@@ -2,9 +2,10 @@
 import torch
 import torch.nn as nn
 
+from weiacviz.loading.adapter import HFCausalLMAdapter
 from weiacviz.loading.calibration import load_calibration_texts  # noqa: F401
 from weiacviz.loading.module_resolver import resolve_modules
-from weiacviz.loading.runner import capture_sample_inputs, run_calibration
+from weiacviz.loading.runner import run_calibration
 from weiacviz.loading.weights import get_weight
 from weiacviz.quant.fake_quant import fake_quantize_tensor
 from weiacviz.quant.sensitivity import layer_sensitivity, layer_sensitivity_output
@@ -68,7 +69,7 @@ def test_end_to_end_pipeline(tmp_path):
 
     # 2. calibration + online activation aggregation
     texts = ["a b c d"] * 16
-    agg = run_calibration(model, DummyTok(), texts, paths, seq_length=8)
+    agg = run_calibration(HFCausalLMAdapter(model, DummyTok(), texts, seq_length=8), paths)
     for p in paths:
         assert agg.stats[p]["output"].count > 0
 
@@ -138,7 +139,7 @@ def test_app_build_report_and_export():
     model = TinyModel()
     app = App()
     app._model = model
-    app._tokenizer = DummyTok()
+    app._adapter = HFCausalLMAdapter(model, DummyTok(), seq_length=8)
     app._model_name = "tiny-test"
     app._resolve_result = resolve_modules(model)
     app._modules = app._resolve_result.modules
@@ -164,15 +165,15 @@ def test_app_view_activation_per_token():
     model = TinyModel()
     app = App()
     app._model = model
-    app._tokenizer = DummyTok()
+    app._adapter = HFCausalLMAdapter(model, DummyTok(), seq_length=8)
     app._resolve_result = resolve_modules(model)
     app._modules = app._resolve_result.modules
     paths = [m.path for m in app._modules]
 
     texts = ["a b c d"] * 8
     app._aggregator = run_calibration(
-        model, DummyTok(), texts, paths,
-        config=CaptureConfig(max_samples=8, batch_size=4), seq_length=8,
+        HFCausalLMAdapter(model, DummyTok(), texts, seq_length=8), paths,
+        config=CaptureConfig(max_samples=8, batch_size=4),
         collect_histogram=True, num_bins=32, collect_token_stats=True,
     )
     advice, global_fig, token_fig, slice_vio, slice_hm = \
@@ -194,7 +195,7 @@ def test_app_view_activation_slice_view_without_calibration():
     model = TinyModel()
     app = App()
     app._model = model
-    app._tokenizer = DummyTok()
+    app._adapter = HFCausalLMAdapter(model, DummyTok(), seq_length=8)
     app._resolve_result = resolve_modules(model)
     app._modules = app._resolve_result.modules
     paths = [m.path for m in app._modules]
@@ -214,7 +215,7 @@ def test_capture_sample_inputs_returns_one_per_module():
     per target module."""
     model = TinyModel()
     paths = [m.path for m in resolve_modules(model).modules]
-    si = capture_sample_inputs(model, DummyTok(), paths, text="abc", seq_length=8)
+    si = HFCausalLMAdapter(model, DummyTok(), seq_length=8).sample_inputs(paths)
     assert set(si.keys()) == set(paths)
     for t in si.values():
         assert t.dim() >= 2  # [batch, seq, hidden]
@@ -226,7 +227,7 @@ def test_layer_sensitivity_output_ranks_and_has_joint():
     model = TinyModel()
     paths = [m.path for m in resolve_modules(model).modules]
     weights = {p: get_weight(model, p) for p in paths}
-    si = capture_sample_inputs(model, DummyTok(), paths, text="abc", seq_length=8)
+    si = HFCausalLMAdapter(model, DummyTok(), seq_length=8).sample_inputs(paths)
     kinds = {m.path: m.kind.value for m in resolve_modules(model).modules}
     cfg = QuantConfig(bits=4, granularity=Granularity.PER_CHANNEL,
                       symmetry=Symmetry.SYMMETRIC)
@@ -249,7 +250,7 @@ def test_app_run_sensitivity_returns_table_and_heatmap():
     model = TinyModel()
     app = App()
     app._model = model
-    app._tokenizer = DummyTok()
+    app._adapter = HFCausalLMAdapter(model, DummyTok(), seq_length=8)
     app._resolve_result = resolve_modules(model)
     app._modules = app._resolve_result.modules
 

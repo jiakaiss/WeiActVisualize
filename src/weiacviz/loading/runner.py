@@ -303,23 +303,21 @@ class OnlineAggregator:
         return out
 
 
-def _run_pass(model, tokenizer, texts: List[str], batch_size: int, device,
-              seq_length: int, aggregator: OnlineAggregator,
-              capture: ActivationCapture, update_stats: bool,
-              update_histogram: bool,
+def _run_pass(adapter, n_samples: int, batch_size: int,
+              aggregator: OnlineAggregator, capture: ActivationCapture,
+              update_stats: bool, update_histogram: bool,
               progress_cb: Optional[Callable[[int, int], None]],
               done_offset: int, total: int) -> int:
-    """Run one pass of batched inference, folding captures into the aggregator."""
+    """Run one pass of batched inference, folding captures into the aggregator.
+
+    Batches come from ``adapter.calib_batches`` (deterministic) and forward
+    via ``adapter.run_forward``; the adapter owns tokenization / forward
+    signature, so the runner is framework-agnostic.
+    """
     with torch.no_grad():
         done = done_offset
-        for bi in range(0, len(texts), batch_size):
-            batch_texts = texts[bi:bi + batch_size]
-            enc = tokenizer(
-                batch_texts, return_tensors="pt", padding=True,
-                truncation=True, max_length=seq_length,
-            )
-            input_ids = enc["input_ids"].to(device)
-            model(input_ids)
+        for batch in adapter.calib_batches(n_samples, batch_size):
+            adapter.run_forward(batch)
             aggregator.update_from_capture(
                 capture, update_stats=update_stats,
                 update_histogram=update_histogram,
@@ -332,10 +330,9 @@ def _run_pass(model, tokenizer, texts: List[str], batch_size: int, device,
 
 
 def run_calibration(
-    model, tokenizer, texts: List[str], module_paths: List[str],
+    adapter, module_paths: List[str],
     config: Optional[CaptureConfig] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
-    seq_length: int = 2048,
     collect_histogram: bool = False,
     num_bins: int = 256,
     collect_token_stats: bool = True,
@@ -345,80 +342,52 @@ def run_calibration(
     Memory is independent of the number of batches: raw activations are
     released after each batch's stats are folded into the aggregator.
 
+    ``adapter`` supplies calibration batches and the forward call (see
+    ``ModelAdapter``); the runner itself is framework-agnostic. For a causal
+    LM use ``HFCausalLMAdapter``; for a DiT or custom model implement
+    ``calib_batches`` + ``run_forward``.
+
     When ``collect_histogram`` is True a two-pass scheme is used: Pass 1
     collects scalar running stats to fix each module/role's global [min, max],
     then Pass 2 re-runs inference bucketing activations into an online
     histogram with that fixed range. The model is set to eval() for the
     duration so Pass 2 stays within Pass 1's range; any out-of-range values
-    are dropped by np.histogram.
+    are dropped by np.histogram. The adapter's ``calib_batches`` must be
+    deterministic so both passes see the same data.
 
     When ``collect_token_stats`` is True (default), per-token abs_max moments
     are aggregated in Pass 1 (O(1) memory) for the per-token activation
     quantization decision; if ``collect_histogram`` is also True the per-token
     abs_max histogram is filled in Pass 2 for visualization.
     """
-    cfg = config or CaptureConfig(max_samples=len(texts))
-    texts = texts[: cfg.max_samples]
+    cfg = config or CaptureConfig()
+    n_samples = cfg.max_samples
+    batch_size = max(1, cfg.batch_size)
     aggregator = OnlineAggregator(
         module_paths, collect_token_stats=collect_token_stats,
         token_bins=num_bins,
     )
     capture = ActivationCapture(module_paths, cfg.capture_inputs, cfg.capture_outputs)
-    capture.attach(model)
+    capture.attach(adapter.model)
 
-    batch_size = max(1, cfg.batch_size)
-    n_batches = (len(texts) + batch_size - 1) // batch_size
-    device = getattr(model, "device", torch.device("cpu"))
+    n_batches = (n_samples + batch_size - 1) // batch_size
     total = n_batches * (2 if collect_histogram else 1)
 
-    was_training = getattr(model, "training", False)
-    model.eval()
+    was_training = getattr(adapter.model, "training", False)
+    adapter.model.eval()
 
     try:
-        _run_pass(model, tokenizer, texts, batch_size, device, seq_length,
-                  aggregator, capture, update_stats=True, update_histogram=False,
+        _run_pass(adapter, n_samples, batch_size, aggregator, capture,
+                  update_stats=True, update_histogram=False,
                   progress_cb=progress_cb, done_offset=0, total=total)
 
         if collect_histogram:
             aggregator.build_histograms(num_bins)
-            _run_pass(model, tokenizer, texts, batch_size, device, seq_length,
-                      aggregator, capture, update_stats=False, update_histogram=True,
+            _run_pass(adapter, n_samples, batch_size, aggregator, capture,
+                      update_stats=False, update_histogram=True,
                       progress_cb=progress_cb, done_offset=n_batches, total=total)
     finally:
         capture.detach()
         if was_training:
-            model.train()
+            adapter.model.train()
     return aggregator
-
-
-def capture_sample_inputs(model, tokenizer, module_paths: List[str],
-                          text: str = "", seq_length: int = 128,
-                          ) -> Dict[str, torch.Tensor]:
-    """Run one forward pass and return one input activation per target module.
-
-    Used by sensitivity analysis (output_diff): provides a real input tensor
-    for each module so quantization error can be measured at the module output
-    rather than just the weight. Memory is one batch per module; the caller
-    releases the tensors when done.
-    """
-    cap = ActivationCapture(module_paths, capture_inputs=True, capture_outputs=False)
-    cap.attach(model)
-    device = getattr(model, "device", torch.device("cpu"))
-    was_training = getattr(model, "training", False)
-    model.eval()
-    try:
-        enc = tokenizer([text] if text else ["test"], return_tensors="pt",
-                        padding=True, truncation=True, max_length=seq_length)
-        input_ids = enc["input_ids"].to(device)
-        with torch.no_grad():
-            model(input_ids)
-        inputs: Dict[str, torch.Tensor] = {}
-        for p in module_paths:
-            entry = cap.buffer.get(p, {})
-            if "input" in entry:
-                inputs[p] = entry["input"]
-    finally:
-        cap.detach()
-        if was_training:
-            model.train()
-    return inputs

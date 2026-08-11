@@ -20,13 +20,11 @@ from .charts import (
 )
 from .progress import ProgressReporter, gradio_progress_adapter
 from .structure import build_module_table, build_overview
+from ..loading.adapter import HFCausalLMAdapter, ModelAdapter
+from ..loading.adapters.dit_demo import build_demo_dit_adapter
 from ..loading.calibration import load_calibration_texts
-from ..loading.model_loader import load_model
-from ..loading.module_resolver import resolve_modules
-from ..loading.runner import (
-    capture_sample_inputs,
-    run_calibration,
-)
+from ..loading.model_loader import load_causal_lm_adapter
+from ..loading.runner import run_calibration
 from ..loading.weights import get_weight
 from ..quant.fake_quant import fake_quantize_tensor
 from ..quant.scheme_compare import compare_schemes
@@ -42,35 +40,30 @@ from ..stats.activation_stats import (
 )
 from ..stats.weight_stats import weight_stats
 
-# Single-sample text for the on-demand per-token slice view. Repeated so a real
-# tokenizer yields enough tokens (truncated to seq_length) for a top-k violin;
-# the synthetic test tokenizer ignores the content.
-_ACT_SAMPLE_TEXT = (
-    "The quick brown fox jumps over the lazy dog. "
-    "Large language models are composed of stacked transformer blocks. "
-    "Activation distributions inform quantization suitability decisions. "
-    "Outlier channels dominate the activation range and drive quantization error. "
-) * 8
-
-
 class App:
     """Stateful application holding the loaded model and captured stats."""
 
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
-        self._model = None
-        self._tokenizer = None
+        self._adapter: Optional[ModelAdapter] = None
+        self._model = None  # = self._adapter.model; kept for get_weight etc.
         self._modules = []
         self._resolve_result = None
         self._aggregator = None
         self._last_report = None
 
-    def load(self, model_name_or_path: str, dtype: str, device: str):
-        self._model, self._tokenizer = load_model(
-            model_name_or_path, dtype=dtype, device=device,
-        )
-        self._model_name = model_name_or_path
-        self._resolve_result = resolve_modules(self._model)
+    def load(self, model_name_or_path: str, dtype: str, device: str,
+             adapter_type: str = "HF CausalLM"):
+        if adapter_type == "DiT 演示":
+            self._adapter = build_demo_dit_adapter()
+            self._model_name = "MiniDiT (demo)"
+        else:
+            self._adapter = load_causal_lm_adapter(
+                model_name_or_path, dtype=dtype, device=device,
+            )
+            self._model_name = model_name_or_path
+        self._model = self._adapter.model
+        self._resolve_result = self._adapter.enumerate_modules()
         self._modules = self._resolve_result.modules
         overview = build_overview(self._resolve_result, self._model)
         table = pd.DataFrame(build_module_table(self._resolve_result, self._model))
@@ -106,11 +99,15 @@ class App:
                   collect_token_stats: bool,
                   progress=gr.Progress()):
         paths = [m.path for m in self._modules]
-        texts = load_calibration_texts(dataset, num_samples=num_samples)
+        # Causal-LM adapters consume text calibration data; DiT/custom adapters
+        # generate their own batches and ignore `dataset`.
+        if isinstance(self._adapter, HFCausalLMAdapter):
+            texts = load_calibration_texts(dataset, num_samples=num_samples)
+            self._adapter.set_texts(texts)
         reporter = ProgressReporter(gradio_progress_adapter(progress))
-        cfg = CaptureConfig(max_samples=len(texts), batch_size=int(batch_size))
+        cfg = CaptureConfig(max_samples=int(num_samples), batch_size=int(batch_size))
         self._aggregator = run_calibration(
-            self._model, self._tokenizer, texts, paths,
+            self._adapter, paths,
             config=cfg, progress_cb=reporter.callback,
             collect_histogram=bool(collect_histogram),
             num_bins=int(num_bins),
@@ -149,36 +146,30 @@ class App:
         # --- per-token slice view (on-demand sample, no calibration needed) ---
         slice_violin = go.Figure().update_layout(template="plotly_white")
         slice_heatmap = go.Figure().update_layout(template="plotly_white")
-        if self._tokenizer is None:
-            slice_violin = slice_violin.update_layout(title="缺少 tokenizer，无法捕获激活样本")
-            slice_heatmap = slice_heatmap.update_layout(title="缺少 tokenizer，无法捕获激活样本")
+        try:
+            # input activation = what gets quantized in W8A8 (y = W·x);
+            # adapter.sample_inputs runs one forward + hook (tokenizer/latent
+            # handled by the adapter).
+            inputs = self._adapter.sample_inputs([module_path])
+            sample = inputs.get(module_path)
+        except Exception:  # noqa: BLE001  forward/shape errors -> placeholder
+            sample = None
+        if sample is None:
+            slice_violin = slice_violin.update_layout(
+                title=f"未捕获到 {module_path} 的输入激活样本")
+            slice_heatmap = slice_heatmap.update_layout(
+                title=f"未捕获到 {module_path} 的输入激活样本")
         else:
-            try:
-                # input activation = what gets quantized in W8A8 (y = W·x);
-                # reuse capture_sample_inputs (one forward, independent hook)
-                cap = capture_sample_inputs(
-                    self._model, self._tokenizer, [module_path],
-                    text=_ACT_SAMPLE_TEXT, seq_length=int(seq_length),
-                )
-                sample = cap.get(module_path)
-            except Exception:  # noqa: BLE001  forward/shape errors -> placeholder
-                sample = None
-            if sample is None:
-                slice_violin = slice_violin.update_layout(
-                    title=f"未捕获到 {module_path} 的输入激活样本")
-                slice_heatmap = slice_heatmap.update_layout(
-                    title=f"未捕获到 {module_path} 的输入激活样本")
-            else:
-                tok_stats = activation_stats_per_token(sample, module_path)
-                # flatten [..., seq, hidden] -> [N, hidden] so each token is a
-                # violin slice; channel_violin slices axis 0, and a 3D
-                # [batch, seq, hidden] would otherwise yield 1 slice (by batch)
-                sample_2d = sample.reshape(-1, sample.shape[-1])
-                slice_violin = channel_violin(
-                    sample_2d, granularity=Granularity.PER_CHANNEL, stats=tok_stats,
-                    name=f"per-token 输入分布: {module_path}")
-                slice_heatmap = channel_stats_heatmap(
-                    tok_stats, title=f"per-token 输入形态: {module_path}")
+            tok_stats = activation_stats_per_token(sample, module_path)
+            # flatten [..., seq, hidden] -> [N, hidden] so each token is a
+            # violin slice; channel_violin slices axis 0, and a 3D
+            # [batch, seq, hidden] would otherwise yield 1 slice (by batch)
+            sample_2d = sample.reshape(-1, sample.shape[-1])
+            slice_violin = channel_violin(
+                sample_2d, granularity=Granularity.PER_CHANNEL, stats=tok_stats,
+                name=f"per-token 输入分布: {module_path}")
+            slice_heatmap = channel_stats_heatmap(
+                tok_stats, title=f"per-token 输入形态: {module_path}")
 
         # --- per-token abs_max distribution + outlier magnitude (calibration) ---
         # input role: the activation quantized in W8A8 is the Linear input (x)
@@ -269,10 +260,8 @@ class App:
         whole model. Uses output_diff sensitivity + weight shape, and emits a
         'why + how' reason.
         """
-        if self._model is None:
+        if self._adapter is None:
             raise gr.Error("请先在「模型加载」tab 加载模型后再生成报告")
-        if self._tokenizer is None:
-            raise gr.Error("缺少 tokenizer，请确认模型已完整加载")
         if not self._modules:
             raise gr.Error("没有目标 module，请检查模型是否为支持的架构")
         rows = self._sensitivity_rows(bits, seq_length)
@@ -318,11 +307,7 @@ class App:
         weights = {p: get_weight(self._model, p) for p in paths}
         cfg = QuantConfig(bits=int(bits), granularity=Granularity.PER_CHANNEL,
                           symmetry=Symmetry.SYMMETRIC)
-        texts = load_calibration_texts(self.settings.calibration_dataset, num_samples=1)
-        sample_inputs = capture_sample_inputs(
-            self._model, self._tokenizer, paths,
-            text=texts[0] if texts else "", seq_length=int(seq_length),
-        )
+        sample_inputs = self._adapter.sample_inputs(paths)
         kinds = {m.path: m.kind.value for m in self._modules}
         rows = layer_sensitivity_output(
             self._model, paths, weights, sample_inputs, cfg, kinds=kinds,
@@ -353,10 +338,8 @@ class App:
         ``weight_kurtosis_max`` high => weight heavy-tail; ``joint_output_mse``
         远大于 ``output_mse`` => activation-side quantization loss.
         """
-        if self._model is None:
+        if self._adapter is None:
             raise gr.Error("请先在「模型加载」tab 加载模型")
-        if self._tokenizer is None:
-            raise gr.Error("缺少 tokenizer，请确认模型已完整加载")
         if not self._modules:
             raise gr.Error("没有目标 module")
         rows = self._sensitivity_rows(bits, seq_length)
@@ -376,6 +359,10 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
     with gr.Blocks() as demo:
         gr.Markdown("# WeiActVisualize - 量化适配性分析")
         with gr.Tab("模型加载"):
+            adapter_dd = gr.Dropdown(
+                ["HF CausalLM", "DiT 演示"], value="HF CausalLM", label="模型类型",
+                info="DiT 演示加载内置 mini-DiT；真实 DiT 请用 Python API 接入 DiTAdapter",
+            )
             m_in = gr.Textbox(label="model name or path", value=app_obj.settings.model_name_or_path)
             d_in = gr.Dropdown(["fp32", "fp16", "bf16"], value=app_obj.settings.dtype, label="dtype")
             dev_in = gr.Dropdown(["auto", "cpu"], value=app_obj.settings.device, label="device")
@@ -391,7 +378,7 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                 interactive=False,
                 wrap=True,
             )
-            load_btn.click(app_obj.load, [m_in, d_in, dev_in],
+            load_btn.click(app_obj.load, [m_in, d_in, dev_in, adapter_dd],
                            [load_out, overview_md, structure_df, model_code])
 
         with gr.Tab("权重分布"):
@@ -431,7 +418,15 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                         [w_fig, w_hm, w_vio])
 
         with gr.Tab("校准与激活"):
-            ds_in = gr.Textbox(value=app_obj.settings.calibration_dataset, label="dataset")
+            ds_in = gr.Textbox(value=app_obj.settings.calibration_dataset, label="dataset",
+                               visible=True)
+
+            def toggle_dataset(adapter_type):
+                # DiT/custom adapters generate their own batches; hide the text
+                # dataset input for them.
+                return gr.update(visible=(adapter_type == "HF CausalLM"))
+
+            adapter_dd.change(toggle_dataset, inputs=adapter_dd, outputs=ds_in)
             ns_in = gr.Slider(1, 1024, value=app_obj.settings.calibration_samples, step=1, label="samples")
             bs_in = gr.Slider(1, 64, value=app_obj.settings.calibration_batch_size, step=1, label="batch size")
             hist_in = gr.Checkbox(value=app_obj.settings.calibration_collect_histogram,
