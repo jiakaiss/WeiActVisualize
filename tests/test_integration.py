@@ -1,4 +1,5 @@
 """End-to-end integration test on a synthetic model (no HF download)."""
+import pytest
 import torch
 import torch.nn as nn
 
@@ -7,8 +8,13 @@ from weiacviz.loading.calibration import load_calibration_texts  # noqa: F401
 from weiacviz.loading.module_resolver import resolve_modules
 from weiacviz.loading.runner import run_calibration
 from weiacviz.loading.weights import get_weight
+from weiacviz.quant.error_metrics import output_diff
 from weiacviz.quant.fake_quant import fake_quantize_tensor
-from weiacviz.quant.sensitivity import layer_sensitivity, layer_sensitivity_output
+from weiacviz.quant.sensitivity import (
+    layer_sensitivity,
+    layer_sensitivity_output,
+    layer_sensitivity_output_multi,
+)
 from weiacviz.report.export import export_json, export_markdown
 from weiacviz.report.recommend import recommend
 from weiacviz.shared.types import Granularity, QuantConfig, Symmetry
@@ -260,5 +266,86 @@ def test_app_run_sensitivity_returns_table_and_heatmap():
                 "weight_kurtosis_max", "heavy_channel_ratio"}
     assert expected <= set(df.columns)
     assert hm is not None
+
+
+# --- multi-sample sensitivity (average over calibration samples) ---
+
+class SeqDummyTok:
+    """Like DummyTok but yields (batch, seq, hidden) tensors, so Linear
+    activations carry a real sequence axis for max_tokens truncation."""
+
+    def __call__(self, texts, return_tensors="pt", padding=True,
+                 truncation=True, max_length=2048):
+        n = len(texts)
+        return {"input_ids": torch.randn(n, max_length, 8)}
+
+
+def test_sample_inputs_batched_walks_calibration_stream():
+    """sample_inputs_batched yields one {path: input} dict per calibration
+    batch, with the sequence axis truncated to max_tokens."""
+    model = TinyModel()
+    adapter = HFCausalLMAdapter(model, SeqDummyTok(), texts=["a b c"] * 4, seq_length=8)
+    paths = [m.path for m in resolve_modules(model).modules]
+    batches = list(adapter.sample_inputs_batched(
+        paths, n_samples=4, batch_size=2, max_tokens=4))
+    assert len(batches) == 2
+    assert set(batches[0].keys()) == set(paths)
+    for inp in batches[0].values():
+        assert inp.dim() >= 2
+        assert inp.shape[-2] == 4  # truncated to the token window
+
+
+def test_layer_sensitivity_output_multi_averages_over_batches():
+    """multi-sample output mse == mean of per-batch output_diff mse; rows
+    carry n_samples and sort desc by joint_output_mse."""
+    model = TinyModel()
+    adapter = HFCausalLMAdapter(model, DummyTok(), texts=["a b c"] * 2, seq_length=8)
+    result = resolve_modules(model)
+    paths = [m.path for m in result.modules]
+    weights = {p: get_weight(model, p) for p in paths}
+    cfg = QuantConfig(bits=4, granularity=Granularity.PER_CHANNEL,
+                      symmetry=Symmetry.SYMMETRIC)
+    batches = list(adapter.sample_inputs_batched(paths, n_samples=2, batch_size=1))
+
+    rows = layer_sensitivity_output_multi(model, paths, weights, batches, cfg)
+    assert len(rows) == len(paths)
+    by_path = {r["module_path"]: r for r in rows}
+
+    # reference: manual mean of per-batch output_diff on the same batches
+    p = paths[0]
+    module = model.get_submodule(p)
+    q = fake_quantize_tensor(weights[p], cfg)
+    ref = sum(output_diff(module, q, b[p], quantize_activation=False)["mse"]
+              for b in batches) / len(batches)
+    assert by_path[p]["output_mse"] == pytest.approx(ref, rel=1e-6)
+    assert by_path[p]["n_samples"] == len(batches)
+
+    js = [r["joint_output_mse"] for r in rows]
+    assert js == sorted(js, reverse=True)
+
+
+def test_app_run_sensitivity_multi_sample_averages():
+    """App.run_sensitivity with n_samples>1 runs the calibration-averaged
+    path (loads texts itself when unset) and returns the same table shape."""
+    from weiacviz.viz.app import App
+
+    model = TinyModel()
+    app = App()
+    app._model = model
+    app._adapter = HFCausalLMAdapter(model, DummyTok(), seq_length=8)  # no texts
+    app._resolve_result = resolve_modules(model)
+    app._modules = app._resolve_result.modules
+
+    # texts unset -> App primes them from the configured dataset (falls back
+    # to built-in sample texts offline), then averages over 2 samples
+    df, hm = app.run_sensitivity(bits=4, sort_by="joint_output_mse",
+                                 n_samples=2, seq_length=8)
+    assert len(df) == len(app._modules)
+    assert df["joint_output_mse"].notna().any()
+    assert hm is not None
+
+    df1, _ = app.run_sensitivity(bits=4, sort_by="joint_output_mse",
+                                 n_samples=1, seq_length=8)
+    assert len(df1) == len(app._modules)
 
 

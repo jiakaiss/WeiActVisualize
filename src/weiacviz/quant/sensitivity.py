@@ -78,3 +78,60 @@ def layer_sensitivity_output(
         for r in rows[:topk]:
             r["top"] = True
     return rows
+
+
+def layer_sensitivity_output_multi(
+    model, module_paths: List[str], weights: Dict[str, torch.Tensor],
+    input_batches, config: QuantConfig,
+    kinds: Optional[Dict[str, str]] = None, topk: int = 0, act_bits: int = 8,
+) -> List[dict]:
+    """Multi-sample version of :func:`layer_sensitivity_output`.
+
+    ``input_batches`` is an iterable of ``{path: input activation}`` dicts
+    (see ``ModelAdapter.sample_inputs_batched``). Per-module ``output_mse`` /
+    ``joint_output_mse`` are **averaged over the batches** that provided an
+    input for that module, so the ranking reflects the calibration
+    distribution rather than one fixed sample. The fake-quantized weight is
+    computed once per module and reused across batches.
+
+    Row format matches :func:`layer_sensitivity_output` plus ``n_samples``
+    (how many batches actually contributed; modules never captured get NaN
+    mse and ``n_samples=0``).
+    """
+    kinds = kinds or {}
+    q_weights = {p: fake_quantize_tensor(weights[p], config)
+                 for p in module_paths}
+    sums = {p: [0.0, 0.0] for p in module_paths}  # [sum output_mse, sum joint]
+    counts = {p: 0 for p in module_paths}
+    for inputs in input_batches:
+        for path in module_paths:
+            inp = inputs.get(path)
+            if inp is None:
+                continue
+            try:
+                module = model.get_submodule(path)
+                sums[path][0] += output_diff(
+                    module, q_weights[path], inp,
+                    quantize_activation=False)["mse"]
+                sums[path][1] += output_diff(
+                    module, q_weights[path], inp,
+                    quantize_activation=True, act_bits=act_bits)["mse"]
+                counts[path] += 1
+            except Exception:  # noqa: BLE001
+                pass
+    rows: List[dict] = []
+    for path in module_paths:
+        n = counts[path]
+        rows.append({
+            "module_path": path, "kind": kinds.get(path, ""),
+            "output_mse": sums[path][0] / n if n else float("nan"),
+            "joint_output_mse": sums[path][1] / n if n else float("nan"),
+            "n_samples": n,
+        })
+    rows.sort(key=lambda r: r["joint_output_mse"]
+              if r["joint_output_mse"] == r["joint_output_mse"]
+              else float("-inf"), reverse=True)
+    if topk:
+        for r in rows[:topk]:
+            r["top"] = True
+    return rows

@@ -58,6 +58,13 @@ class ModelAdapter:
     def device(self):
         return self._device
 
+    @property
+    def has_calibration_data(self) -> bool:
+        """Whether :meth:`calib_batches` can yield data right now. HF adapters
+        need ``set_texts`` first; DiT / custom adapters generate their own
+        batches and always can."""
+        return True
+
     def enumerate_modules(self) -> ResolveResult:
         """Enumerate target modules. Default reuses ``resolve_modules`` which
         already falls back to all ``nn.Linear`` for unknown architectures."""
@@ -85,20 +92,14 @@ class ModelAdapter:
         """
         return next(self.calib_batches(n_samples=1, batch_size=1))
 
-    def sample_inputs(self, module_paths: List[str]) -> Dict[str, torch.Tensor]:
-        """Run one forward and return one input activation per target module.
-
-        Used by sensitivity analysis (``output_diff``): provides a real input
-        tensor for each module so quantization error can be measured at the
-        module output. Default implementation runs one forward via a capture
-        hook; subclasses normally do NOT need to override this.
-        """
+    def _capture_inputs(self, batch, module_paths: List[str]) -> Dict[str, torch.Tensor]:
+        """Run one forward on ``batch`` and return one input activation per
+        target module (forward hook does the capture)."""
         cap = ActivationCapture(module_paths, capture_inputs=True, capture_outputs=False)
         cap.attach(self._model)
         was_training = getattr(self._model, "training", False)
         self._model.eval()
         try:
-            batch = self._sample_batch()
             with torch.no_grad():
                 self.run_forward(batch)
             inputs: Dict[str, torch.Tensor] = {}
@@ -111,6 +112,40 @@ class ModelAdapter:
             if was_training:
                 self._model.train()
         return inputs
+
+    def sample_inputs(self, module_paths: List[str]) -> Dict[str, torch.Tensor]:
+        """Run one forward and return one input activation per target module.
+
+        Used by sensitivity analysis (``output_diff``): provides a real input
+        tensor for each module so quantization error can be measured at the
+        module output. Default implementation runs one forward via a capture
+        hook; subclasses normally do NOT need to override this.
+        """
+        return self._capture_inputs(self._sample_batch(), module_paths)
+
+    def sample_inputs_batched(self, module_paths: List[str], n_samples: int,
+                              batch_size: int = 1,
+                              max_tokens: Optional[int] = None):
+        """Yield ``{path: input activation}`` once per calibration batch.
+
+        Multi-sample sensitivity: unlike :meth:`sample_inputs` (one fixed
+        sample), this walks the real calibration stream so the measured
+        quantization error can be averaged over representative data. Yields
+        per batch so memory stays at one batch's captures.
+
+        ``max_tokens`` optionally truncates the sequence axis after capture
+        (a representative token window suffices for the error estimate) to
+        bound memory: held inputs become O(modules x max_tokens x hidden).
+        """
+        for batch in self.calib_batches(n_samples, batch_size):
+            inputs = self._capture_inputs(batch, module_paths)
+            if max_tokens is not None:
+                inputs = {
+                    p: (t.narrow(-2, 0, min(max_tokens, t.shape[-2])).contiguous()
+                        if t.dim() >= 2 else t)
+                    for p, t in inputs.items()
+                }
+            yield inputs
 
 
 class HFCausalLMAdapter(ModelAdapter):
@@ -135,6 +170,10 @@ class HFCausalLMAdapter(ModelAdapter):
     def set_texts(self, texts: List[str]) -> None:
         """Set (or replace) the calibration texts after construction."""
         self._texts = list(texts)
+
+    @property
+    def has_calibration_data(self) -> bool:
+        return bool(self._texts)
 
     def calib_batches(self, n_samples: int, batch_size: int) -> Iterator[torch.Tensor]:
         if not self._texts:

@@ -28,7 +28,10 @@ from ..loading.runner import run_calibration
 from ..loading.weights import get_weight
 from ..quant.fake_quant import fake_quantize_tensor
 from ..quant.scheme_compare import compare_schemes
-from ..quant.sensitivity import layer_sensitivity_output
+from ..quant.sensitivity import (
+    layer_sensitivity_output,
+    layer_sensitivity_output_multi,
+)
 from ..report.export import export_csv, export_json, export_markdown
 from ..report.recommend import recommend
 from ..shared.config import Settings, get_settings
@@ -255,16 +258,17 @@ class App:
             fig = go.Figure()
         return df, best_text, fig
 
-    def build_report(self, bits: int, seq_length: int = 128):
+    def build_report(self, bits: int, n_samples: int = 1, seq_length: int = 128):
         """Build a per-module quantization recommendation report over the
         whole model. Uses output_diff sensitivity + weight shape, and emits a
-        'why + how' reason.
+        'why + how' reason. ``n_samples > 1`` averages the sensitivity over
+        calibration samples (see ``_sensitivity_rows``).
         """
         if self._adapter is None:
             raise gr.Error("请先在「模型加载」tab 加载模型后再生成报告")
         if not self._modules:
             raise gr.Error("没有目标 module，请检查模型是否为支持的架构")
-        rows = self._sensitivity_rows(bits, seq_length)
+        rows = self._sensitivity_rows(bits, seq_length, n_samples)
         cfg = QuantConfig(bits=int(bits), granularity=Granularity.PER_CHANNEL,
                           symmetry=Symmetry.SYMMETRIC)
         model_name = getattr(self, "_model_name", "") or self.settings.model_name_or_path
@@ -296,22 +300,39 @@ class App:
             export_csv([r.__dict__ for r in self._last_report.recommendations], path)
         return path
 
-    def _sensitivity_rows(self, bits: int, seq_length: int = 128) -> List[dict]:
+    def _sensitivity_rows(self, bits: int, seq_length: int = 128,
+                          n_samples: int = 1) -> List[dict]:
         """Build enriched per-module sensitivity rows for the whole model.
 
         Combines output_diff sensitivity with per-channel weight shape
         (kurtosis/skewness median). Shared by the sensitivity overview and the
         recommendation report.
+
+        ``n_samples > 1``: average the output error over that many calibration
+        samples (``sample_inputs_batched`` -> ``layer_sensitivity_output_multi``),
+        so the ranking reflects the calibration distribution instead of one
+        fixed sample. ``seq_length`` caps the token window per sample to bound
+        memory. ``n_samples=1`` keeps the single-sample fast path (works even
+        before any calibration data is loaded).
         """
         paths = [m.path for m in self._modules]
         weights = {p: get_weight(self._model, p) for p in paths}
         cfg = QuantConfig(bits=int(bits), granularity=Granularity.PER_CHANNEL,
                           symmetry=Symmetry.SYMMETRIC)
-        sample_inputs = self._adapter.sample_inputs(paths)
         kinds = {m.path: m.kind.value for m in self._modules}
-        rows = layer_sensitivity_output(
-            self._model, paths, weights, sample_inputs, cfg, kinds=kinds,
-        )
+        if int(n_samples) > 1 and self._prime_calibration_texts(int(n_samples)):
+            batches = self._adapter.sample_inputs_batched(
+                paths, n_samples=int(n_samples),
+                max_tokens=int(seq_length) if seq_length else None,
+            )
+            rows = layer_sensitivity_output_multi(
+                self._model, paths, weights, batches, cfg, kinds=kinds,
+            )
+        else:
+            sample_inputs = self._adapter.sample_inputs(paths)
+            rows = layer_sensitivity_output(
+                self._model, paths, weights, sample_inputs, cfg, kinds=kinds,
+            )
         for r in rows:
             p = r["module_path"]
             ws = weight_stats(weights[p], p, granularity=Granularity.PER_CHANNEL)
@@ -330,10 +351,30 @@ class App:
             r["weight_skewness"] = float(np.median(skews)) if skews else float("nan")
         return rows
 
-    def run_sensitivity(self, bits: int, sort_by: str, seq_length: int = 128):
+    def _prime_calibration_texts(self, n_samples: int) -> bool:
+        """Ensure the adapter can yield calibration data for multi-sample
+        sensitivity. HF adapters need texts set (loaded from the configured
+        dataset); DiT / custom adapters generate their own batches and always
+        pass. Returns False only if calibration data cannot be provided.
+        """
+        if getattr(self._adapter, "has_calibration_data", True):
+            return True
+        if isinstance(self._adapter, HFCausalLMAdapter):
+            texts = load_calibration_texts(
+                self.settings.calibration_dataset,
+                num_samples=n_samples,
+            )
+            self._adapter.set_texts(texts)
+            return True
+        return False
+
+    def run_sensitivity(self, bits: int, sort_by: str, n_samples: int = 1,
+                        seq_length: int = 128):
         """Whole-model sensitivity ranking by output_diff (main) + weight shape.
 
-        See ``_sensitivity_rows`` for the per-module signals. The table shows
+        ``n_samples > 1`` averages the output error over that many
+        calibration samples (see ``_sensitivity_rows``). See
+        ``_sensitivity_rows`` for the per-module signals. The table shows
         *why* a module is sensitive in one glance: ``output_mse`` high +
         ``weight_kurtosis_max`` high => weight heavy-tail; ``joint_output_mse``
         远大于 ``output_mse`` => activation-side quantization loss.
@@ -342,7 +383,7 @@ class App:
             raise gr.Error("请先在「模型加载」tab 加载模型")
         if not self._modules:
             raise gr.Error("没有目标 module")
-        rows = self._sensitivity_rows(bits, seq_length)
+        rows = self._sensitivity_rows(bits, seq_length, n_samples)
         key_field = "joint_output_mse" if sort_by == "joint_output_mse" else "output_mse"
         rows.sort(key=lambda r: r[key_field] if r[key_field] == r[key_field]
                   else float("-inf"), reverse=True)
@@ -500,11 +541,14 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                 "全模型量化敏感性排序（默认按 **joint_output_mse**：W8A8 权重+激活联合量化层输出误差）。"
                 "``output_mse``=只权重量化(W4A16)，``joint_output_mse``=权重+per-token激活(W8A8)，"
                 "差值≈激活量化损失。``heavy_channel_ratio`` 高=权重重尾通道。需先加载模型。"
+                "**评估样本数 >1 时输出误差在校准样本上取平均**（每样本截取前 128 token 评估）。"
             )
             with gr.Row():
                 sens_bits = gr.Dropdown([4, 8], value=4, label="参考 bits")
                 sens_sort = gr.Radio(["joint_output_mse", "output_mse"],
                                      value="joint_output_mse", label="排序依据")
+            sens_ns = gr.Slider(1, 32, value=8, step=1,
+                                label="评估样本数（>1 在校准样本上取平均，慢但稳）")
             sens_btn = gr.Button("运行敏感性分析")
             sens_table = gr.Dataframe(
                 headers=["module_path", "kind", "output_mse", "joint_output_mse",
@@ -513,7 +557,8 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                 interactive=False, wrap=True,
             )
             sens_hm = gr.Plot(label="层 × 指标 热力图（每行独立归一化）")
-            sens_btn.click(app_obj.run_sensitivity, [sens_bits, sens_sort],
+            sens_btn.click(app_obj.run_sensitivity,
+                           [sens_bits, sens_sort, sens_ns],
                            [sens_table, sens_hm])
 
         with gr.Tab("报告"):
@@ -524,6 +569,8 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                 "需先加载模型。"
             )
             rep_bits = gr.Dropdown([4, 8], value=4, label="参考 bits（敏感性评估用）")
+            rep_ns = gr.Slider(1, 32, value=8, step=1,
+                               label="评估样本数（>1 在校准样本上取平均）")
             rep_btn = gr.Button("生成报告")
             rep_summary = gr.Textbox(label="概览")
             rep_table = gr.Dataframe(
@@ -538,7 +585,8 @@ def build_app(settings: Optional[Settings] = None) -> gr.Blocks:
                                    label="导出格式")
                 exp_btn = gr.Button("导出")
             exp_file = gr.File(label="下载报告")
-            rep_btn.click(app_obj.build_report, [rep_bits], [rep_table, rep_summary])
+            rep_btn.click(app_obj.build_report, [rep_bits, rep_ns],
+                          [rep_table, rep_summary])
             exp_btn.click(app_obj.export_report, [exp_fmt], [exp_file])
 
     demo.queue()
