@@ -270,11 +270,21 @@ def test_app_run_sensitivity_returns_table_and_heatmap():
 
 # --- multi-sample sensitivity (average over calibration samples) ---
 
+class SeqDummyTok:
+    """Like DummyTok but yields (batch, seq, hidden) tensors, so Linear
+    activations carry a real sequence axis for max_tokens truncation."""
+
+    def __call__(self, texts, return_tensors="pt", padding=True,
+                 truncation=True, max_length=2048):
+        n = len(texts)
+        return {"input_ids": torch.randn(n, max_length, 8)}
+
+
 def test_sample_inputs_batched_walks_calibration_stream():
     """sample_inputs_batched yields one {path: input} dict per calibration
     batch, with the sequence axis truncated to max_tokens."""
     model = TinyModel()
-    adapter = HFCausalLMAdapter(model, DummyTok(), texts=["a b c"] * 4, seq_length=8)
+    adapter = HFCausalLMAdapter(model, SeqDummyTok(), texts=["a b c"] * 4, seq_length=8)
     paths = [m.path for m in resolve_modules(model).modules]
     batches = list(adapter.sample_inputs_batched(
         paths, n_samples=4, batch_size=2, max_tokens=4))
