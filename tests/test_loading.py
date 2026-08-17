@@ -80,6 +80,102 @@ def test_unknown_arch_degrades_to_all_linears():
     assert len(result.modules) > 0
 
 
+class TinyGPT2Block(nn.Module):
+    """GPT-2 naming: fused c_attn + c_proj in BOTH attn and mlp."""
+
+    def __init__(self, d=8):
+        super().__init__()
+        self.attn = nn.Module()
+        self.attn.c_attn = nn.Linear(d, 3 * d)
+        self.attn.c_proj = nn.Linear(d, d)
+        self.mlp = nn.Module()
+        self.mlp.c_fc = nn.Linear(d, 4 * d)
+        self.mlp.c_proj = nn.Linear(4 * d, d)
+
+    def forward(self, x):
+        return x
+
+
+class TinyGPT2(nn.Module):
+    def __init__(self, d=8, n=2):
+        super().__init__()
+        self.config = type("C", (), {"architectures": ["GPT2LMHeadModel"]})()
+        self.h = nn.ModuleList([TinyGPT2Block(d) for _ in range(n)])
+
+    def forward(self, x):
+        return x
+
+
+def test_resolve_gpt2_modules_disambiguates_shared_c_proj():
+    result = resolve_modules(TinyGPT2())
+    assert result.family == "gpt2"
+    assert not result.degraded
+    kinds = {m.path: m.kind for m in result.modules}
+    assert kinds["h.0.attn.c_attn"] == ModuleKind.ATTENTION
+    assert kinds["h.0.attn.c_proj"] == ModuleKind.ATTENTION
+    assert kinds["h.0.mlp.c_fc"] == ModuleKind.MLP
+    # shared suffix disambiguated by parent module name, and neither dropped
+    assert kinds["h.0.mlp.c_proj"] == ModuleKind.MLP
+
+
+class TinyBert(nn.Module):
+    """BERT naming: attention.self.query/key/value + intermediate/output dense."""
+
+    def __init__(self, d=8):
+        super().__init__()
+        self.config = type("C", (), {"architectures": ["BertModel"]})()
+        self.encoder = nn.Module()
+        self.encoder.layer = nn.ModuleList([nn.Module() for _ in range(1)])
+        self.encoder.layer[0].attention = nn.Module()
+        self.encoder.layer[0].attention.self = nn.Module()
+        self.encoder.layer[0].attention.self.query = nn.Linear(d, d)
+        self.encoder.layer[0].attention.self.key = nn.Linear(d, d)
+        self.encoder.layer[0].attention.self.value = nn.Linear(d, d)
+        self.encoder.layer[0].intermediate = nn.Module()
+        self.encoder.layer[0].intermediate.dense = nn.Linear(d, d)
+
+    def forward(self, x):
+        return x
+
+
+def test_resolve_bert_modules():
+    result = resolve_modules(TinyBert())
+    assert result.family == "bert"
+    assert not result.degraded
+    kinds = {m.path: m.kind for m in result.modules}
+    assert kinds["encoder.layer.0.attention.self.query"] == ModuleKind.ATTENTION
+    assert kinds["encoder.layer.0.intermediate.dense"] == ModuleKind.MLP
+
+
+class TinyDiTNamed(nn.Module):
+    """DiT naming: qkv/proj + fc1/fc2 under blocks.N."""
+
+    def __init__(self, d=8, n=2):
+        super().__init__()
+        self.config = type("C", (), {"architectures": ["DiT"]})()
+        self.blocks = nn.ModuleList()
+        for _ in range(n):
+            blk = nn.Module()
+            blk.qkv = nn.Linear(d, 3 * d)
+            blk.proj = nn.Linear(d, d)
+            blk.fc1 = nn.Linear(d, 4 * d)
+            blk.fc2 = nn.Linear(4 * d, d)
+            self.blocks.append(blk)
+
+    def forward(self, x):
+        return x
+
+
+def test_resolve_dit_modules():
+    result = resolve_modules(TinyDiTNamed())
+    assert result.family == "dit"
+    assert not result.degraded
+    kinds = {m.path: m.kind for m in result.modules}
+    assert kinds["blocks.0.qkv"] == ModuleKind.ATTENTION
+    assert kinds["blocks.0.fc1"] == ModuleKind.MLP
+    assert len(result.modules) == 8  # 4 per block, none dropped
+
+
 def test_weight_access_and_slice():
     model = TinyLlamaLike()
     w = get_weight(model, "layers.0.self_attn.q_proj")

@@ -8,12 +8,12 @@ import torch
 import torch.nn as nn
 
 from weiacviz.loading.adapter import DiTAdapter, HFCausalLMAdapter
-from weiacviz.loading.adapters.dit_demo import build_demo_dit_adapter
+from weiacviz.loading.adapters.dit_demo import MiniDiT, build_demo_dit_adapter
 from weiacviz.loading.runner import run_calibration
 from weiacviz.loading.weights import get_weight
 from weiacviz.quant.error_metrics import output_diff
 from weiacviz.quant.fake_quant import fake_quantize_tensor
-from weiacviz.shared.types import Granularity, QuantConfig, Symmetry
+from weiacviz.shared.types import Granularity, ModuleKind, QuantConfig, Symmetry
 from weiacviz.stats.weight_stats import weight_stats
 
 
@@ -106,11 +106,15 @@ def test_dit_adapter_calib_batches_deterministic():
 def test_dit_adapter_enumerates_linear_modules():
     adapter = build_demo_dit_adapter()
     result = adapter.enumerate_modules()
-    # MiniDiT is not Llama-named -> degraded (all Linear as OTHER), but every
-    # DiT projection layer is present.
-    assert result.degraded
+    # MiniDiT uses standard DiT naming -> classified as the `dit` family
+    # (attn/mlp kinds, not degraded); embed/final layers are dropped just
+    # like the embed of a known Llama-family model.
+    assert not result.degraded
+    assert result.family == "dit"
     names = {m.path.split(".")[-1] for m in result.modules}
-    assert {"attn_qkv", "attn_proj", "mlp_fc1", "mlp_fc2", "adaLN_modulation"} <= names
+    assert {"qkv", "proj", "fc1", "fc2", "adaLN_modulation"} <= names
+    assert all(m.kind in (ModuleKind.ATTENTION, ModuleKind.MLP)
+               for m in result.modules)
 
 
 def test_dit_adapter_sample_inputs_captures_linear_input():
@@ -155,3 +159,48 @@ def test_dit_adapter_is_model_adapter_subclass():
     adapter = build_demo_dit_adapter()
     assert isinstance(adapter, DiTAdapter)
     assert hasattr(adapter, "calib_batches") and hasattr(adapter, "run_forward")
+
+
+# --- verify_adapter self-check (adapters/diagnose.py) ---
+
+def test_verify_adapter_all_pass_on_demo_dit():
+    from weiacviz.loading.adapters.diagnose import verify_adapter
+
+    rep = verify_adapter(build_demo_dit_adapter())
+    by_name = {c.name: c for c in rep.checks}
+    assert set(by_name) >= {"enumerate_modules", "calib_batches",
+                            "input_capture", "output_diff"}
+    assert rep.all_ok
+    assert "PASS" in rep.format()
+
+
+def test_verify_adapter_flags_nondeterministic_calib_batches():
+    """A generator whose stream shifts between calls must FAIL determinism."""
+    from weiacviz.loading.adapters.diagnose import verify_adapter
+
+    class FlakyAdapter(DiTAdapter):
+        """Unseeded randn: the stream differs between the two verify passes."""
+
+        def calib_batches(self, n_samples, batch_size):
+            for _ in range(0, n_samples, batch_size):
+                yield {"x": torch.randn(1, 8, 16),
+                       "t": torch.zeros(1), "y": torch.zeros(1, dtype=torch.long)}
+
+    adapter = FlakyAdapter(MiniDiT(), latent_shape=(8, 16), num_classes=10)
+    rep = verify_adapter(adapter)
+    calib = next(c for c in rep.checks if c.name == "calib_batches")
+    assert not calib.ok
+    assert "deterministic" in calib.detail
+    assert not rep.all_ok
+    assert "FAIL" in rep.format()
+
+
+def test_verify_adapter_reports_missing_calibration_texts():
+    """HF adapter without set_texts fails fast with an actionable hint."""
+    from weiacviz.loading.adapters.diagnose import verify_adapter
+
+    adapter = HFCausalLMAdapter(LlamaLike(), DummyTok())  # no texts
+    rep = verify_adapter(adapter)
+    calib = next(c for c in rep.checks if c.name == "calib_batches")
+    assert not calib.ok
+    assert "set_texts" in calib.detail
