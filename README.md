@@ -7,7 +7,7 @@
 - **模型加载与张量捕获**：内置 HF causal LM（Llama/Qwen/Mistral/DeepSeek）与 DiT；通过 `ModelAdapter` 接口可接入任意 `nn.Linear` 模型，`device_map=auto` 分块加载支持大模型，forward hook 非侵入式捕获激活
 - **在线聚合**：激活逐批聚合为 running statistics，不保留原始张量，内存与模型规模解耦
 - **分布统计**：权重/激活 per-tensor/channel/group 统计、直方图、离群值检测（百分位 / Z-score）、分布距离（KL / Wasserstein）
-- **量化模拟**：fake quantization（W4/W8、per-tensor/channel/group、对称/非对称），MSE / cosine 误差度量，层级敏感性分析
+- **量化模拟**：fake quantization（W4/W8、per-tensor/channel/group、对称/非对称），MSE / cosine 误差度量，层级敏感性分析（输出误差可在多个校准样本上平均，避免单样本误排层序）
 - **交互式可视化**：Gradio 界面，直方图 / 热力图 / 量化前后对比，按层 / 模块 / bit 筛选，推理队列 + 进度条
 - **报告与导出**：量化建议报告（Markdown）+ 数据（CSV/JSON）+ 图表（PNG）
 
@@ -76,7 +76,8 @@ UI 模型加载 tab 选「DiT 演示」可在界面跑通 DiT 全流程；真实
 2. **权重分布**：观察各层权重分布与离群情况，定位异常层
 3. **校准与激活**：跑校准推理捕获激活统计（在线聚合，大模型不 OOM）
 4. **量化模拟**：对比量化前后分布与误差，多方案对比
-5. **报告**：基于敏感性分析生成量化建议（哪些层适合 W4、哪些需保 W8）
+5. **敏感性分析**：量化输出误差按层排序；「样本数」滑块（1–32，默认 8）控制在校准数据上平均的批次数——单样本会受个别难样本影响，多样本平均排序更稳
+6. **报告**：基于敏感性分析生成量化建议（哪些层适合 W4、哪些需保 W8）
 
 ## 测试
 
