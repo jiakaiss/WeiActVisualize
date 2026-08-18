@@ -10,9 +10,27 @@ from ..shared.types import Granularity
 
 
 def get_weight(model: nn.Module, module_path: str) -> torch.Tensor:
-    """Read a module's weight tensor (offline, no inference)."""
+    """Read a module's weight tensor (offline, no inference).
+
+    For modules offloaded by ``accelerate`` (``device_map=auto`` on a model
+    larger than the GPU), ``module.weight`` is a meta placeholder; the real
+    weight is recovered from the offload hook's ``weights_map`` (it lives on
+    CPU). Raises if recovery is impossible.
+    """
     mod = model.get_submodule(module_path)
-    return mod.weight.detach()
+    w = mod.weight
+    if w.is_meta:
+        hook = getattr(mod, "_hf_hook", None)
+        weights_map = getattr(hook, "weights_map", None)
+        if weights_map is not None:
+            try:
+                return weights_map["weight"].detach()
+            except Exception:  # noqa: BLE001 -- fall through to the error
+                pass
+        raise RuntimeError(
+            f"weight of '{module_path}' is on the meta device (accelerate "
+            f"offload) and could not be recovered from the offload hook")
+    return w.detach()
 
 
 def slice_weight(weight: torch.Tensor, granularity: Granularity,
