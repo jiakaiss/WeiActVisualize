@@ -41,6 +41,7 @@ from ..stats.activation_stats import (
     activation_token_outliers,
     activation_token_summary,
 )
+from ..stats.shape import channel_shape_stats
 from ..stats.weight_stats import weight_stats
 
 class App:
@@ -335,11 +336,12 @@ class App:
             )
         for r in rows:
             p = r["module_path"]
-            ws = weight_stats(weights[p], p, granularity=Granularity.PER_CHANNEL)
-            kurts = [s.kurtosis for s in ws if s.kurtosis == s.kurtosis]
-            skews = [s.skewness for s in ws if s.skewness == s.skewness]
-            if kurts:
-                kurts_arr = np.asarray(kurts, dtype=np.float64)
+            # vectorized per-channel shape metrics (the weight_stats per-slice
+            # loop with histograms/percentiles dominates runtime over N modules)
+            kurts_arr, skews_arr = channel_shape_stats(weights[p])
+            kurts_arr = kurts_arr[kurts_arr == kurts_arr]
+            skews_arr = skews_arr[skews_arr == skews_arr]
+            if kurts_arr.size:
                 r["weight_kurtosis_max"] = float(kurts_arr.max())
                 # heavy channel = per-channel excess kurtosis > 3 (Laplace-like);
                 # the median would hide these (LLM weight medians are ~0.5 but a
@@ -348,7 +350,8 @@ class App:
             else:
                 r["weight_kurtosis_max"] = float("nan")
                 r["heavy_channel_ratio"] = float("nan")
-            r["weight_skewness"] = float(np.median(skews)) if skews else float("nan")
+            r["weight_skewness"] = (float(np.median(skews_arr))
+                                    if skews_arr.size else float("nan"))
         return rows
 
     def _prime_calibration_texts(self, n_samples: int) -> bool:

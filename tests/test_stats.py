@@ -2,6 +2,7 @@
 import math
 
 import numpy as np
+import pytest
 import torch
 import plotly.graph_objects as go
 
@@ -392,3 +393,78 @@ def test_render_token_absmax_violin_with_histogram_and_outliers():
     fig = render_token_absmax_violin(ts, outlier_info=info)
     assert isinstance(fig, go.Figure)
     assert len(fig.data) >= 1  # violin trace present
+
+
+def test_channel_shape_stats_matches_per_slice_scalars():
+    """Vectorized per-channel kurtosis/skewness == the scalar functions run
+    per row (incl. zero-variance rows -> NaN)."""
+    from weiacviz.stats.shape import channel_shape_stats
+
+    rng = np.random.default_rng(0)
+    w = rng.normal(size=(7, 50))
+    w[2] = 0.0                      # zero-variance row -> NaN both ways
+    w[4, :25] *= 40.0               # heavy-tail-ish row
+    kurt, skew = channel_shape_stats(w)
+    assert kurt.shape == (7,) and skew.shape == (7,)
+    for i in range(7):
+        assert kurt[i] == pytest.approx(excess_kurtosis(w[i]), nan_ok=True)
+        assert skew[i] == pytest.approx(skewness(w[i]), nan_ok=True)
+
+    # 1D input behaves like a single channel
+    k1, s1 = channel_shape_stats(w[0])
+    assert k1[0] == pytest.approx(excess_kurtosis(w[0]))
+    assert s1[0] == pytest.approx(skewness(w[0]))
+
+    # torch tensors accepted (fp16 like real weights); reference computed on
+    # the fp16-rounded values themselves (fp16 storage loses precision)
+    wt = torch.tensor(w, dtype=torch.float16)
+    wnp = wt.float().numpy().astype(np.float64)
+    kt, st = channel_shape_stats(wt)
+    for i in range(7):
+        assert kt[i] == pytest.approx(excess_kurtosis(wnp[i]), nan_ok=True)
+        assert st[i] == pytest.approx(skewness(wnp[i]), nan_ok=True)
+
+
+def test_sensitivity_weight_shape_fields_match_weight_stats():
+    """The vectorized fast path in _sensitivity_rows produces the same
+    weight-shape fields as the old per-slice weight_stats route."""
+    import torch.nn as nn
+
+    from weiacviz.loading.adapter import HFCausalLMAdapter
+    from weiacviz.loading.module_resolver import resolve_modules
+    from weiacviz.loading.weights import get_weight
+    from weiacviz.stats.weight_stats import weight_stats
+    from weiacviz.viz.app import App
+
+    class MiniLlama(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = type("C", (), {"architectures": ["LlamaForCausalLM"]})()
+            blk = nn.Module()
+            blk.self_attn = nn.Module()
+            blk.self_attn.q_proj = nn.Linear(8, 8)
+            blk.mlp = nn.Module()
+            blk.mlp.down_proj = nn.Linear(8, 8)
+            self.layers = nn.ModuleList([blk])
+
+        def forward(self, x):
+            return x
+
+    model = MiniLlama()
+    app = App()
+    app._adapter = HFCausalLMAdapter(model, lambda t, **k: {"input_ids": torch.randn(len(t), 8)})
+    app._model = model
+    app._resolve_result = resolve_modules(model)
+    app._modules = app._resolve_result.modules
+    app._adapter.set_texts(["a b c"] * 4)
+
+    rows = app._sensitivity_rows(bits=4, seq_length=8, n_samples=2)
+    for r in rows:
+        ws = weight_stats(get_weight(model, r["module_path"]),
+                          r["module_path"], granularity=Granularity.PER_CHANNEL)
+        kurts = [s.kurtosis for s in ws if s.kurtosis == s.kurtosis]
+        skews = [s.skewness for s in ws if s.skewness == s.skewness]
+        assert r["weight_kurtosis_max"] == pytest.approx(max(kurts))
+        assert r["heavy_channel_ratio"] == pytest.approx(
+            sum(k > 3.0 for k in kurts) / len(kurts))
+        assert r["weight_skewness"] == pytest.approx(float(np.median(skews)))
