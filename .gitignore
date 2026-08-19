@@ -30,3 +30,6 @@ htmlcov/
 
 # Claude local settings (keep skills/commands, ignore local-only settings)
 .claude/settings.local.json
+
+# Downloaded model weights (modelscope cache)
+.models/

@@ -10,6 +10,37 @@ from .fake_quant import fake_quantize_tensor
 from ..shared.types import QuantConfig
 
 
+def _forwardable(module):
+    """Return a module ``output_diff`` can run, substituting accelerate-
+    offloaded modules. ``device_map=auto`` offload leaves ``module.weight``
+    on the meta device and dispatches the real weight via forward hooks, so
+    the weight-swap inside ``output_diff`` breaks. For those, build a plain
+    CPU ``nn.Linear`` from the real weight recovered via the offload hook;
+    the quantization error itself is unchanged. Returns the module unchanged
+    when recovery fails (the caller's try/except degrades the row to NaN).
+    """
+    if not module.weight.is_meta:
+        return module
+    hook = getattr(module, "_hf_hook", None)
+    weights_map = getattr(hook, "weights_map", None)
+    if weights_map is None:
+        return module
+    try:
+        w = weights_map["weight"].detach().float()
+        try:
+            b = weights_map["bias"].detach().float()
+        except Exception:  # noqa: BLE001 -- no bias on this module
+            b = None
+        lin = torch.nn.Linear(w.shape[1], w.shape[0], bias=b is not None)
+        lin.weight = torch.nn.Parameter(w)
+        if b is not None:
+            lin.bias = torch.nn.Parameter(b)
+        lin.eval()
+        return lin
+    except Exception:  # noqa: BLE001
+        return module
+
+
 def layer_sensitivity(weights: Dict[str, torch.Tensor], config: QuantConfig,
                       topk: int = 10) -> List[dict]:
     """Rank modules by per-layer quantization MSE (descending).
@@ -59,7 +90,7 @@ def layer_sensitivity_output(
         joint_mse = float("nan")
         if inp is not None:
             try:
-                module = model.get_submodule(path)
+                module = _forwardable(model.get_submodule(path))
                 out_mse = output_diff(module, q, inp,
                                       quantize_activation=False)["mse"]
                 joint_mse = output_diff(module, q, inp,
@@ -91,16 +122,20 @@ def layer_sensitivity_output_multi(
     (see ``ModelAdapter.sample_inputs_batched``). Per-module ``output_mse`` /
     ``joint_output_mse`` are **averaged over the batches** that provided an
     input for that module, so the ranking reflects the calibration
-    distribution rather than one fixed sample. The fake-quantized weight is
-    computed once per module and reused across batches.
+    distribution rather than one fixed sample.
+
+    The fake-quantized weight is recomputed per (module, batch) instead of
+    being precomputed for ALL modules up front: holding one q-weight per
+    module simultaneously is another full copy of the weights and OOMs on
+    models that near GPU capacity (e.g. a 7B fp16 on 16 GB). Only one
+    q-weight is alive at a time; the extra quantize passes are cheap next to
+    the output_diff forwards.
 
     Row format matches :func:`layer_sensitivity_output` plus ``n_samples``
     (how many batches actually contributed; modules never captured get NaN
     mse and ``n_samples=0``).
     """
     kinds = kinds or {}
-    q_weights = {p: fake_quantize_tensor(weights[p], config)
-                 for p in module_paths}
     sums = {p: [0.0, 0.0] for p in module_paths}  # [sum output_mse, sum joint]
     counts = {p: 0 for p in module_paths}
     for inputs in input_batches:
@@ -109,12 +144,13 @@ def layer_sensitivity_output_multi(
             if inp is None:
                 continue
             try:
-                module = model.get_submodule(path)
+                module = _forwardable(model.get_submodule(path))
+                q = fake_quantize_tensor(weights[path], config)
                 sums[path][0] += output_diff(
-                    module, q_weights[path], inp,
+                    module, q, inp,
                     quantize_activation=False)["mse"]
                 sums[path][1] += output_diff(
-                    module, q_weights[path], inp,
+                    module, q, inp,
                     quantize_activation=True, act_bits=act_bits)["mse"]
                 counts[path] += 1
             except Exception:  # noqa: BLE001

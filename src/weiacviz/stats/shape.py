@@ -61,6 +61,33 @@ def robust_tail_ratio(a, lo: float = 0.1, hi: float = 99.9) -> float:
     return (p_hi - p_lo) / (2.0 * std)
 
 
+def channel_shape_stats(a) -> tuple:
+    """Vectorized per-channel (row-wise) excess kurtosis and skewness.
+
+    Equivalent to calling :func:`excess_kurtosis` / :func:`skewness` on each
+    row of a 2D weight, but in one vectorized pass. ``weight_stats`` computes
+    these per slice in a Python loop alongside histograms / percentiles /
+    outliers -- fine for one module, but callers that only need shape metrics
+    for every module (e.g. the sensitivity table's heavy-channel flags) must
+    use this fast path instead.
+
+    Returns ``(kurtosis, skewness)`` arrays with one entry per row (NaN for
+    zero-variance rows, matching the scalar functions).
+    """
+    arr = to_numpy(a)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    d = arr - arr.mean(axis=-1, keepdims=True)
+    var = (d ** 2).mean(axis=-1)
+    m3 = (d ** 3).mean(axis=-1)
+    m4 = (d ** 4).mean(axis=-1)
+    ok = var > 0
+    safe = np.where(ok, var, 1.0)
+    kurt = np.where(ok, m4 / (safe * safe) - 3.0, np.nan)
+    skew = np.where(ok, m3 / safe ** 1.5, np.nan)
+    return kurt, skew
+
+
 def shape_label(kurtosis: float, skewness: float) -> str:
     """Readable shape label from excess kurtosis, with skewness annotation.
 
