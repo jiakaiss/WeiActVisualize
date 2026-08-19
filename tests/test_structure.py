@@ -66,6 +66,14 @@ def test_layer_index_parsing_blocks_naming():
     assert _layer_index("model.layers.2.x") == 2  # still works
 
 
+def test_layer_index_parsing_gpt2_and_bert_naming():
+    """GPT-2 `h.N.` and BERT `encoder.layer.N.` layer numbering is parsed."""
+    assert _layer_index("transformer.h.0.attn.c_attn") == 0
+    assert _layer_index("transformer.h.11.mlp.c_fc") == 11
+    assert _layer_index("encoder.layer.3.attention.self.query") == 3
+    assert _layer_index("bert.pooler.dense") == -1
+
+
 def test_module_table_params_and_sort():
     model = TinyModel(n=3)
     result = resolve_modules(model)

@@ -20,20 +20,27 @@ from ..adapter import DiTAdapter
 
 
 class MiniDiTBlock(nn.Module):
-    """One DiT block: (pseudo) attention + MLP + adaLN modulation path."""
+    """One DiT block: (pseudo) attention + MLP + adaLN modulation path.
+
+    Uses standard DiT naming (``attn.qkv`` / ``attn.proj`` / ``mlp.fc1`` /
+    ``mlp.fc2`` / ``adaLN_modulation``) so the demo also exercises the
+    ``dit`` architecture-family classification.
+    """
 
     def __init__(self, d: int = 16):
         super().__init__()
-        self.attn_qkv = nn.Linear(d, 3 * d)
-        self.attn_proj = nn.Linear(d, d)
-        self.mlp_fc1 = nn.Linear(d, 4 * d)
-        self.mlp_fc2 = nn.Linear(4 * d, d)
+        self.attn = nn.Module()
+        self.attn.qkv = nn.Linear(d, 3 * d)
+        self.attn.proj = nn.Linear(d, d)
+        self.mlp = nn.Module()
+        self.mlp.fc1 = nn.Linear(d, 4 * d)
+        self.mlp.fc2 = nn.Linear(4 * d, d)
         self.adaLN_modulation = nn.Linear(d, 6 * d)
 
     def forward(self, x, c):
-        q, k, v = self.attn_qkv(x).chunk(3, dim=-1)
-        x = x + self.attn_proj(q + k + v)      # pseudo-attention (no heads)
-        x = x + self.mlp_fc2(torch.relu(self.mlp_fc1(x)))
+        q, k, v = self.attn.qkv(x).chunk(3, dim=-1)
+        x = x + self.attn.proj(q + k + v)      # pseudo-attention (no heads)
+        x = x + self.mlp.fc2(torch.relu(self.mlp.fc1(x)))
         _ = self.adaLN_modulation(c)           # adaLN path; weights still analyzed
         return x
 

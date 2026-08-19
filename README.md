@@ -54,10 +54,13 @@ python -m weiacviz.viz.app
 - `HFCausalLMAdapter`：HF causal LM（默认），tokenize 文本 -> `model(input_ids)`
 - `DiTAdapter`：Diffusion Transformer，随机 latent+timestep -> `model(x, t, y)`
 
-接入其他模型（vision / 多模态 / 自定义 `nn.Module`），子类化 `ModelAdapter` override 两个方法即可，Linear 主线自动复用：
+接入其他模型（vision / 多模态 / 自定义 `nn.Module`），复制 `adapters/template.py`
+实现两个方法即可，Linear 主线自动复用；适配完用 `verify_adapter` 一键体检
+（模块枚举 / 校准流确定性 / 激活捕获 / 敏感度可用性）：
 
 ```python
 from weiacviz.loading.adapter import ModelAdapter
+from weiacviz.loading.adapters.diagnose import verify_adapter
 
 class MyAdapter(ModelAdapter):
     def calib_batches(self, n_samples, batch_size):
@@ -66,9 +69,14 @@ class MyAdapter(ModelAdapter):
 
     def run_forward(self, batch):
         self._model(batch["x"], batch["t"], ...)  # 你的 forward 签名
+
+print(verify_adapter(MyAdapter(my_model)))  # 全 PASS 再接入
 ```
 
-UI 模型加载 tab 选「DiT 演示」可在界面跑通 DiT 全流程；真实 DiT 用 Python API（`DiTAdapter`）。详见 `src/weiacviz/loading/adapters/README.md`。限制：`output_diff` 敏感性要求目标层可独立前向（纯 Linear 成立）；非 Linear 层降级，权重/激活/fake quant 仍可用。
+UI 模型加载 tab 选「DiT 演示」可在界面跑通 DiT 全流程；真实 DiT 用 Python API（`DiTAdapter`）。
+完整适配指南（决策树 / 确定性契约 / checklist / 常见坑）见
+`src/weiacviz/loading/adapters/README.md`。限制：`output_diff` 敏感性要求目标层可独立前向
+（纯 Linear 成立）；非 Linear 层降级，权重/激活/fake quant 仍可用。
 
 ## 典型工作流
 

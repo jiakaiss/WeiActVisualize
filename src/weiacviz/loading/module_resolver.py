@@ -12,7 +12,8 @@ from ..shared.types import ModuleInfo, ModuleKind
 logger = logging.getLogger(__name__)
 
 # Projection suffixes by architecture family. Llama-like naming
-# (q/k/v/o_proj + gate/up/down_proj) covers Llama, Qwen, Mistral, DeepSeek.
+# (q/k/v/o_proj + gate/up/down_proj) covers Llama, Qwen, Mistral, DeepSeek;
+# the rest cover common non-LLama naming (GPT-2 fused, BERT, DiT).
 _ARCH_PATTERNS: Dict[str, Dict[str, List[str]]] = {
     "llama": {"attn": ["q_proj", "k_proj", "v_proj", "o_proj"],
               "mlp": ["gate_proj", "up_proj", "down_proj"]},
@@ -22,6 +23,12 @@ _ARCH_PATTERNS: Dict[str, Dict[str, List[str]]] = {
                 "mlp": ["gate_proj", "up_proj", "down_proj"]},
     "deepseek": {"attn": ["q_proj", "k_proj", "v_proj", "o_proj"],
                  "mlp": ["gate_proj", "up_proj", "down_proj"]},
+    "gpt2": {"attn": ["c_attn", "c_proj"],
+             "mlp": ["c_fc", "c_proj"]},
+    "bert": {"attn": ["query", "key", "value"],
+             "mlp": ["dense"]},
+    "dit": {"attn": ["qkv", "q", "k", "v", "proj"],
+            "mlp": ["fc1", "fc2", "adaLN_modulation"]},
 }
 
 
@@ -46,6 +53,12 @@ def detect_arch_family(model) -> str:
 
 def _classify(name: str, patterns: Dict[str, List[str]]) -> ModuleKind:
     last = name.split(".")[-1]
+    if last in patterns["attn"] and last in patterns["mlp"]:
+        # Shared suffix (e.g. GPT-2 uses c_proj in both attn and mlp):
+        # disambiguate by the parent module's name.
+        parent = name.split(".")[-2].lower() if "." in name else ""
+        return (ModuleKind.MLP if "mlp" in parent or "feed" in parent
+                else ModuleKind.ATTENTION)
     if last in patterns["attn"]:
         return ModuleKind.ATTENTION
     if last in patterns["mlp"]:
